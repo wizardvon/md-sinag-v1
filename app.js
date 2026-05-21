@@ -218,7 +218,7 @@ let selectedCalendarDate = todayIso();
 
 async function loadFirebaseConfig() {
   const configCandidates = [
-    "./firebase-config.js?v=20260515-1",
+    "./firebase-config.js?v=20260521-1",
     "./firebase-config.js",
     "./firebase-config.example.js",
   ];
@@ -286,6 +286,24 @@ function clearAuthMessage() {
   els.authMessage.textContent = "";
   els.authMessage.classList.add("hidden");
   els.authMessage.classList.remove("error");
+}
+
+function formatFirebaseAuthError(error) {
+  const code = error?.code || "";
+  const host = window.location.hostname || "this domain";
+  const messages = {
+    "auth/invalid-credential": "Login failed. Check the Principal email and password, then try again.",
+    "auth/wrong-password": "Login failed. Check the Principal email and password, then try again.",
+    "auth/user-not-found": "No account exists for that email address.",
+    "auth/user-disabled": "This Firebase Auth account is disabled.",
+    "auth/operation-not-allowed": "Email/Password sign-in is disabled in Firebase Authentication.",
+    "auth/unauthorized-domain": `This domain (${host}) is not authorized in Firebase Authentication. Add it in Firebase Console > Authentication > Settings > Authorized domains.`,
+    "auth/api-key-not-valid.-please-pass-a-valid-api-key.": "The Firebase API key in firebase-config.js is not valid for this project.",
+    "auth/network-request-failed": "Firebase could not be reached. Check your internet connection and try again.",
+    "auth/too-many-requests": "Firebase temporarily blocked login attempts. Wait a few minutes, then try again.",
+  };
+
+  return messages[code] || error?.message || "Firebase login failed.";
 }
 
 function showDashboardMessage(message, isError = false) {
@@ -376,7 +394,7 @@ async function handleRegister(event) {
     els.registerForm.reset();
     showAuthMessage("Registration submitted. Your account is pending approval.");
   } catch (error) {
-    showAuthMessage(error.message, true);
+    showAuthMessage(formatFirebaseAuthError(error), true);
   }
 }
 
@@ -398,7 +416,7 @@ async function handleForgotPassword() {
     await sendPasswordResetEmail(auth, email);
     showAuthMessage(`Password reset email sent to ${email}.`);
   } catch (error) {
-    showAuthMessage(error.message, true);
+    showAuthMessage(formatFirebaseAuthError(error), true);
   } finally {
     els.forgotPasswordButton.disabled = false;
   }
@@ -418,7 +436,8 @@ async function handleLogin(event) {
     await signInWithEmailAndPassword(auth, email, password);
     clearAuthMessage();
   } catch (error) {
-    showAuthMessage(error.message, true);
+    console.warn("Firebase login failed:", error);
+    showAuthMessage(formatFirebaseAuthError(error), true);
   }
 }
 
@@ -439,7 +458,15 @@ async function handleAuthState(user) {
     return;
   }
 
-  const userSnap = await getDoc(doc(db, "users", user.uid));
+  let userSnap;
+  try {
+    userSnap = await getDoc(doc(db, "users", user.uid));
+  } catch (error) {
+    console.warn("Unable to load user profile:", error);
+    showAuthMessage("Signed in, but Firestore blocked your user profile. Check that the Principal user document exists and Firestore rules are deployed.", true);
+    await signOut(auth);
+    return;
+  }
   if (!userSnap.exists()) {
     showAuthMessage("No user profile document found. Contact the system administrator.", true);
     await signOut(auth);
@@ -2097,17 +2124,24 @@ function startNotificationListeners() {
       refreshDashboardCalendar(currentUserProfile.role);
     }
   };
+  const handleNotificationError = (label) => (error) => {
+    if (error?.code === "permission-denied") {
+      console.warn(`Unable to load ${label} notifications. The dashboard can still be used, but Firestore rules may need to be deployed.`, error);
+      return;
+    }
+    console.warn(`Unable to load ${label} notifications:`, error);
+  };
 
   notificationUnsubscribers = [
     onSnapshot(
       query(collection(db, "notifications"), where("recipientUid", "==", auth.currentUser.uid)),
       (snapshot) => syncNotifications("direct", snapshot),
-      (error) => console.warn("Unable to load direct notifications:", error)
+      handleNotificationError("direct")
     ),
     onSnapshot(
       query(collection(db, "notifications"), where("recipientUid", "==", notificationRecipientKey(currentUserProfile.role))),
       (snapshot) => syncNotifications("role", snapshot),
-      (error) => console.warn("Unable to load role notifications:", error)
+      handleNotificationError("role")
     ),
   ];
 }
