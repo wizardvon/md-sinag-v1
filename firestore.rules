@@ -1,0 +1,2062 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function userDoc(uid) {
+      return get(/databases/$(database)/documents/users/$(uid));
+    }
+
+    function isApprovedPrincipal() {
+      return signedIn()
+        && userDoc(request.auth.uid).data.status == "approved"
+        && userDoc(request.auth.uid).data.role == "Principal";
+    }
+
+    function currentRole() {
+      return userDoc(request.auth.uid).data.role;
+    }
+
+    function isApprovedRole(role) {
+      return signedIn()
+        && userDoc(request.auth.uid).data.status == "approved"
+        && currentRole() == role;
+    }
+
+    function isAssignmentCreator() {
+      return signedIn()
+        && userDoc(request.auth.uid).data.status == "approved"
+        && currentRole() in ["Principal", "Master Teacher", "Head Teacher"];
+    }
+
+    function isComplianceRole() {
+      return signedIn()
+        && userDoc(request.auth.uid).data.status == "approved"
+        && currentRole() in [
+          "Teacher",
+          "Master Teacher",
+          "Head Teacher",
+          "Registrar",
+          "Administrative Officer",
+          "Administrative Assistant"
+        ];
+    }
+
+    function isLearnerMonitorRole() {
+      return signedIn()
+        && userDoc(request.auth.uid).data.status == "approved"
+        && currentRole() in [
+          "Principal",
+          "Master Teacher",
+          "Head Teacher",
+          "Teacher",
+          "Registrar",
+          "Administrative Officer",
+          "Administrative Assistant"
+        ];
+    }
+
+    function validRole(role) {
+      return role in [
+        "Principal",
+        "Master Teacher",
+        "Head Teacher",
+        "Teacher",
+        "Registrar",
+        "Administrative Officer",
+        "Administrative Assistant"
+      ];
+    }
+
+    function validNewUserProfile(userId) {
+      return request.resource.data.keys().hasOnly([
+          "uid",
+          "fullName",
+          "email",
+          "requestedRole",
+          "role",
+          "status",
+          "createdAt"
+        ])
+        && request.auth.uid == userId
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.email == request.auth.token.email
+        && request.resource.data.fullName is string
+        && request.resource.data.fullName.size() > 0
+        && validRole(request.resource.data.requestedRole)
+        && request.resource.data.role == null
+        && request.resource.data.status == "pending";
+    }
+
+    function validPrincipalApproval() {
+      return isApprovedPrincipal()
+        && resource.data.status == "pending"
+        && request.resource.data.status == "approved"
+        && validRole(request.resource.data.role)
+        && request.resource.data.approvedBy == request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          "role",
+          "status",
+          "approvedAt",
+          "approvedBy"
+        ]);
+    }
+
+    function validPrincipalRoleChange(userId) {
+      return isApprovedPrincipal()
+        && request.auth.uid != userId
+        && resource.data.status == "approved"
+        && request.resource.data.status == "approved"
+        && validRole(request.resource.data.role)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          "role"
+        ]);
+    }
+
+    function canReadUserProfile(userId) {
+      return signedIn()
+        && (
+          request.auth.uid == userId
+          || isApprovedPrincipal()
+          || (isAssignmentCreator() && resource.data.status == "approved")
+          || (
+            userDoc(request.auth.uid).data.status == "approved"
+            && currentRole() in ["Registrar", "Administrative Officer", "Administrative Assistant"]
+            && resource.data.status == "approved"
+          )
+        );
+    }
+
+    function validReportAssignmentType(reportType) {
+      return reportType in [
+        "DLL / Lesson Plan",
+        "Grades Submission",
+        "MPS Report",
+        "Exam / Test Questions",
+        "Table of Specifications",
+        "Accomplishment Report",
+        "Attendance Report",
+        "Class Advisory Report",
+        "Intervention Report",
+        "Enrollment Report",
+        "Transfer Report",
+        "Dropout Report",
+        "Behavior / Violence Incident Report",
+        "Financial Report",
+        "Inventory Report",
+        "Other"
+      ];
+    }
+
+    function validLearnerConcernType(concernType) {
+      return concernType in [
+        "Academic Performance",
+        "Attendance",
+        "Reading",
+        "Numeracy",
+        "Behavior",
+        "Violence Incident",
+        "Incomplete Requirements",
+        "Health/Welfare",
+        "Parent Communication",
+        "Home Visitation",
+        "Dropout Risk",
+        "Transfer Concern",
+        "Other"
+      ];
+    }
+
+    function validLearnerRiskLevel(riskLevel) {
+      return riskLevel in ["Stable", "Needs Monitoring", "High Risk"];
+    }
+
+    function validLearnerInterventionStatus(status) {
+      return status in [
+        "Not Started",
+        "Ongoing",
+        "Improved",
+        "Referred",
+        "Resolved",
+        "Unresolved"
+      ];
+    }
+
+    function validLearnerStatus(status) {
+      return status in [
+        "Active Monitoring",
+        "For Intervention",
+        "Under Intervention",
+        "Resolved",
+        "Referred",
+        "Closed"
+      ];
+    }
+
+    function validObservationType(observationType) {
+      return observationType in [
+        "Formal Observation",
+        "Informal Observation",
+        "Coaching/Mentoring",
+        "Follow-up Observation",
+        "Other"
+      ];
+    }
+
+    function validObservationStatus(status) {
+      return status in [
+        "Scheduled",
+        "Confirmed",
+        "Completed",
+        "Rescheduled",
+        "Cancelled"
+      ];
+    }
+
+    function isEnrollmentMonitorRole() {
+      return signedIn()
+        && userDoc(request.auth.uid).data.status == "approved"
+        && currentRole() in [
+          "Principal",
+          "Master Teacher",
+          "Head Teacher",
+          "Teacher",
+          "Registrar"
+        ];
+    }
+
+    function validEnrollmentStatus(status) {
+      return status in ["Enrolled", "Pending", "Dropped", "Transferred", "Completed"];
+    }
+
+    function validTransferType(transferType) {
+      return transferType in ["Transfer In", "Transfer Out"];
+    }
+
+    function validDropoutRiskLevel(riskLevel) {
+      return riskLevel in ["Low", "Moderate", "High"];
+    }
+
+    function validDropoutStatus(status) {
+      return status in [
+        "At Risk",
+        "Under Monitoring",
+        "Returned",
+        "Confirmed Dropout",
+        "Resolved"
+      ];
+    }
+
+    function validDocumentCategory(category) {
+      return category in [
+        "Memoranda",
+        "Templates",
+        "Reports",
+        "Certificates",
+        "MOVs",
+        "School Forms",
+        "Classroom Observation Reports",
+        "Instructional Materials",
+        "Governance Documents",
+        "Financial Documents",
+        "Enrollment Documents",
+        "Other"
+      ];
+    }
+
+    function isDocumentRole() {
+      return signedIn()
+        && userDoc(request.auth.uid).data.status == "approved"
+        && currentRole() in [
+          "Principal",
+          "Master Teacher",
+          "Head Teacher",
+          "Teacher",
+          "Registrar",
+          "Administrative Officer",
+          "Administrative Assistant"
+        ];
+    }
+
+    function isInventoryFacilityViewer() {
+      return signedIn()
+        && userDoc(request.auth.uid).data.status == "approved"
+        && currentRole() in ["Principal", "Head Teacher", "Administrative Assistant"];
+    }
+
+    function isInventoryFacilityManager() {
+      return signedIn()
+        && userDoc(request.auth.uid).data.status == "approved"
+        && currentRole() in ["Principal", "Administrative Assistant"];
+    }
+
+    function validInventoryCategory(category) {
+      return category in [
+        "Classroom Furniture",
+        "ICT Equipment",
+        "Learning Materials",
+        "Laboratory Equipment",
+        "Sports Equipment",
+        "Clinic Supplies",
+        "Library Resources",
+        "Office Equipment",
+        "Facilities",
+        "Other"
+      ];
+    }
+
+    function validInventoryCondition(condition) {
+      return condition in ["New", "Good", "Fair", "Needs Repair", "Unserviceable", "Missing"];
+    }
+
+    function validInventoryStatus(status) {
+      return status in ["Available", "In Use", "For Repair", "Condemned", "Lost", "Disposed"];
+    }
+
+    function isFinancialReportViewer() {
+      return signedIn()
+        && userDoc(request.auth.uid).data.status == "approved"
+        && currentRole() in [
+          "Principal",
+          "Master Teacher",
+          "Head Teacher",
+          "Teacher",
+          "Registrar",
+          "Administrative Officer",
+          "Administrative Assistant"
+        ];
+    }
+
+    function isFinancialReportManager() {
+      return signedIn()
+        && userDoc(request.auth.uid).data.status == "approved"
+        && currentRole() in ["Principal", "Administrative Officer", "Administrative Assistant"];
+    }
+
+    function isFinancialReportReviewer() {
+      return signedIn()
+        && userDoc(request.auth.uid).data.status == "approved"
+        && currentRole() in ["Principal", "Master Teacher", "Head Teacher"];
+    }
+
+    function validFinancialReportType(reportType) {
+      return reportType in [
+        "MOOE Utilization",
+        "Project Expense",
+        "Procurement",
+        "Donation",
+        "Maintenance",
+        "Other"
+      ];
+    }
+
+    function validFinancialQuarter(quarter) {
+      return quarter in ["Q1", "Q2", "Q3", "Q4"];
+    }
+
+    function validFinancialFundSource(fundSource) {
+      return fundSource in ["MOOE", "Donation", "LGU", "PTA", "Other"];
+    }
+
+    function validFinancialCategory(category) {
+      return category in ["Supplies", "Equipment", "Repairs", "Utilities", "Training", "Program Expense", "Other"];
+    }
+
+    function validFinancialStatus(status) {
+      return status in ["Draft", "Submitted", "Reviewed", "Approved"];
+    }
+
+    function validFinancialFields() {
+      return request.resource.data.keys().hasOnly([
+        "reportTitle",
+        "reportType",
+        "quarter",
+        "schoolYear",
+        "date",
+        "fundSource",
+        "category",
+        "description",
+        "amountAllocated",
+        "amountSpent",
+        "remainingBalance",
+        "status",
+        "remarks",
+        "encodedBy",
+        "encodedAt",
+        "updatedAt",
+        "createdBy",
+        "createdByName",
+        "createdAt",
+        "importedBatchId",
+        "source"
+      ]);
+    }
+
+    function validFinancialValues() {
+      return validFinancialFields()
+        && request.resource.data.reportTitle is string
+        && request.resource.data.reportTitle.size() > 0
+        && validFinancialReportType(request.resource.data.reportType)
+        && validFinancialQuarter(request.resource.data.quarter)
+        && request.resource.data.schoolYear is string
+        && request.resource.data.schoolYear.size() > 0
+        && request.resource.data.date is string
+        && request.resource.data.date.size() > 0
+        && validFinancialFundSource(request.resource.data.fundSource)
+        && validFinancialCategory(request.resource.data.category)
+        && request.resource.data.description is string
+        && request.resource.data.amountAllocated is number
+        && request.resource.data.amountSpent is number
+        && request.resource.data.remainingBalance is number
+        && request.resource.data.remainingBalance == request.resource.data.amountAllocated - request.resource.data.amountSpent
+        && validFinancialStatus(request.resource.data.status)
+        && request.resource.data.remarks is string
+        && request.resource.data.encodedBy is string
+        && request.resource.data.encodedAt is timestamp
+        && request.resource.data.updatedAt is timestamp
+        && request.resource.data.createdBy is string
+        && request.resource.data.createdByName is string
+        && request.resource.data.createdByName.size() > 0
+        && request.resource.data.createdAt is timestamp
+        && request.resource.data.importedBatchId is string
+        && request.resource.data.source in ["manual", "excel_import"];
+    }
+
+    function validFinancialCreate() {
+      return isFinancialReportManager()
+        && validFinancialValues()
+        && request.resource.data.encodedBy == request.auth.uid
+        && request.resource.data.createdBy == request.auth.uid;
+    }
+
+    function validFinancialManagerUpdate() {
+      return isFinancialReportManager()
+        && validFinancialValues()
+        && request.resource.data.encodedBy == resource.data.encodedBy
+        && request.resource.data.encodedAt == resource.data.encodedAt
+        && request.resource.data.createdBy == resource.data.createdBy
+        && request.resource.data.createdByName == resource.data.createdByName
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.importedBatchId == resource.data.importedBatchId
+        && request.resource.data.source == resource.data.source;
+    }
+
+    function validFinancialReviewUpdate() {
+      return isFinancialReportReviewer()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["status", "updatedAt"])
+        && request.resource.data.status in ["Submitted", "Reviewed"];
+    }
+
+    function isPpaRole() {
+      return signedIn()
+        && userDoc(request.auth.uid).data.status == "approved"
+        && currentRole() in [
+          "Principal",
+          "Master Teacher",
+          "Head Teacher",
+          "Teacher",
+          "Registrar",
+          "Administrative Officer",
+          "Administrative Assistant"
+        ];
+    }
+
+    function validPpaCategory(category) {
+      return category in ["Access", "Quality", "Governance"];
+    }
+
+    function validPpaStatus(status) {
+      return status in [
+        "Not Started",
+        "Ongoing",
+        "Completed",
+        "For Improvement",
+        "Needs Technical Assistance"
+      ];
+    }
+
+    function validPpaQuarter(quarter) {
+      return quarter in ["1st Term", "2nd Term", "3rd Term", "Q1", "Q2", "Q3"];
+    }
+
+    function validGoogleDriveFolderLink(link) {
+      return link is string
+        && link.matches("^https?://drive\\.google\\.com/.*/folders/[^/]+.*$");
+    }
+
+    function validLrn(lrn) {
+      return lrn is string && lrn.matches("^[0-9]{12}$");
+    }
+
+    function validSubmissionType(submissionType) {
+      return submissionType in ["Hard Copy", "Soft Copy"];
+    }
+
+    function validReviewerStatus(status) {
+      return status in [
+        "Received",
+        "Checked",
+        "Returned for Revision",
+        "Approved",
+        "Late",
+        "Not Submitted"
+      ];
+    }
+
+    function validAssignableRole(role) {
+      return (currentRole() == "Principal" && validRole(role))
+        || (currentRole() in ["Master Teacher", "Head Teacher"] && role in [
+          "Teacher",
+          "Registrar",
+          "Administrative Officer",
+          "Administrative Assistant"
+        ]);
+    }
+
+    function validReportAssignmentFields() {
+      return request.resource.data.keys().hasOnly([
+        "title",
+        "reportType",
+        "description",
+        "assignedByUid",
+        "assignedByName",
+        "assignedByRole",
+        "assignedToUid",
+        "assignedToName",
+        "assignedToRole",
+        "dueDate",
+        "allowedSubmissionTypes",
+        "submissionType",
+        "fileLink",
+        "submissionRemarks",
+        "reviewRemarks",
+        "status",
+        "createdAt",
+        "submittedAt",
+        "reviewedAt",
+        "reviewedByUid",
+        "reviewedByName",
+        "updatedAt"
+      ]);
+    }
+
+    function validReportAssignmentCreate() {
+      return isAssignmentCreator()
+        && validReportAssignmentFields()
+        && request.resource.data.assignedByUid == request.auth.uid
+        && request.resource.data.assignedByRole == currentRole()
+        && request.resource.data.assignedByName is string
+        && request.resource.data.assignedByName.size() > 0
+        && request.resource.data.assignedToUid is string
+        && request.resource.data.assignedToUid.size() > 0
+        && request.resource.data.assignedToName is string
+        && request.resource.data.assignedToName.size() > 0
+        && validAssignableRole(request.resource.data.assignedToRole)
+        && request.resource.data.title is string
+        && request.resource.data.title.size() > 0
+        && validReportAssignmentType(request.resource.data.reportType)
+        && request.resource.data.description is string
+        && request.resource.data.dueDate is string
+        && request.resource.data.allowedSubmissionTypes is list
+        && request.resource.data.allowedSubmissionTypes.size() > 0
+        && request.resource.data.allowedSubmissionTypes.hasOnly(["Hard Copy", "Soft Copy"])
+        && request.resource.data.status == "Assigned";
+    }
+
+    function validComplianceSubmit() {
+      return isComplianceRole()
+        && resource.data.assignedToUid == request.auth.uid
+        && resource.data.status in ["Assigned", "Returned for Revision", "Late", "Not Submitted"]
+        && validReportAssignmentFields()
+        && request.resource.data.assignedByUid == resource.data.assignedByUid
+        && request.resource.data.assignedByName == resource.data.assignedByName
+        && request.resource.data.assignedByRole == resource.data.assignedByRole
+        && request.resource.data.assignedToUid == resource.data.assignedToUid
+        && request.resource.data.assignedToName == resource.data.assignedToName
+        && request.resource.data.assignedToRole == resource.data.assignedToRole
+        && request.resource.data.title == resource.data.title
+        && request.resource.data.reportType == resource.data.reportType
+        && request.resource.data.description == resource.data.description
+        && request.resource.data.dueDate == resource.data.dueDate
+        && request.resource.data.allowedSubmissionTypes == resource.data.allowedSubmissionTypes
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.status == "Submitted"
+        && validSubmissionType(request.resource.data.submissionType)
+        && request.resource.data.submissionType in resource.data.allowedSubmissionTypes
+        && request.resource.data.submissionRemarks is string
+        && (
+          request.resource.data.submissionType == "Hard Copy"
+          || (
+            request.resource.data.fileLink is string
+            && request.resource.data.fileLink.size() > 0
+          )
+        )
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          "status",
+          "submissionType",
+          "fileLink",
+          "submissionRemarks",
+          "submittedAt",
+          "updatedAt"
+        ]);
+    }
+
+    function validReportReviewUpdate() {
+      return isAssignmentCreator()
+        && (resource.data.assignedByUid == request.auth.uid || isApprovedPrincipal())
+        && validReviewerStatus(request.resource.data.status)
+        && request.resource.data.reviewedByUid == request.auth.uid
+        && request.resource.data.reviewedByName is string
+        && validReportAssignmentFields()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          "status",
+          "reviewRemarks",
+          "reviewedAt",
+          "reviewedByUid",
+          "reviewedByName",
+          "updatedAt"
+        ]);
+    }
+
+    function registrarLearnerConcern(concernType) {
+      return concernType in [
+        "Dropout Risk",
+        "Transfer Concern",
+        "Incomplete Requirements",
+        "Other"
+      ];
+    }
+
+    function administrativeOfficerLearnerConcern(concernType) {
+      return concernType in [
+        "Attendance",
+        "Health/Welfare",
+        "Violence Incident",
+        "Behavior"
+      ];
+    }
+
+    function canReadLearnerRecord() {
+      return isLearnerMonitorRole()
+        && (
+          currentRole() in ["Principal", "Master Teacher", "Head Teacher", "Administrative Assistant"]
+          || resource.data.createdByUid == request.auth.uid
+          || (currentRole() == "Registrar" && registrarLearnerConcern(resource.data.concernType))
+          || (currentRole() == "Administrative Officer" && administrativeOfficerLearnerConcern(resource.data.concernType))
+        );
+    }
+
+    function validLearnerMonitoringFields() {
+      return request.resource.data.keys().hasOnly([
+        "learnerName",
+        "lrn",
+        "gradeLevel",
+        "section",
+        "adviserUid",
+        "adviserName",
+        "concernType",
+        "concernDescription",
+        "riskLevel",
+        "attendanceStatus",
+        "readingLevel",
+        "numeracyLevel",
+        "interventionProvided",
+        "interventionDate",
+        "interventionStatus",
+        "parentContacted",
+        "parentCommunicationNotes",
+        "homeVisitationConducted",
+        "homeVisitationDate",
+        "behaviorIncident",
+        "violenceIncident",
+        "incompleteRequirements",
+        "healthWelfareConcern",
+        "dropoutRisk",
+        "transferConcern",
+        "status",
+        "remarks",
+        "createdByUid",
+        "createdByName",
+        "createdByRole",
+        "createdAt",
+        "updatedAt"
+      ]);
+    }
+
+    function validLearnerMonitoringValues() {
+      return validLearnerMonitoringFields()
+        && request.resource.data.learnerName is string
+        && request.resource.data.learnerName.size() > 0
+        && validLrn(request.resource.data.lrn)
+        && request.resource.data.gradeLevel is string
+        && request.resource.data.gradeLevel.size() > 0
+        && request.resource.data.section is string
+        && request.resource.data.section.size() > 0
+        && request.resource.data.adviserUid is string
+        && request.resource.data.adviserName is string
+        && request.resource.data.adviserName.size() > 0
+        && validLearnerConcernType(request.resource.data.concernType)
+        && request.resource.data.concernDescription is string
+        && validLearnerRiskLevel(request.resource.data.riskLevel)
+        && request.resource.data.attendanceStatus is string
+        && request.resource.data.readingLevel is string
+        && request.resource.data.numeracyLevel is string
+        && request.resource.data.interventionProvided is string
+        && request.resource.data.interventionDate is string
+        && validLearnerInterventionStatus(request.resource.data.interventionStatus)
+        && request.resource.data.parentContacted in ["Yes", "No"]
+        && request.resource.data.parentCommunicationNotes is string
+        && request.resource.data.homeVisitationConducted in ["Yes", "No"]
+        && request.resource.data.homeVisitationDate is string
+        && request.resource.data.behaviorIncident is string
+        && request.resource.data.violenceIncident is string
+        && request.resource.data.incompleteRequirements is string
+        && request.resource.data.healthWelfareConcern is string
+        && request.resource.data.dropoutRisk in ["Yes", "No"]
+        && request.resource.data.transferConcern in ["Yes", "No"]
+        && validLearnerStatus(request.resource.data.status)
+        && request.resource.data.remarks is string;
+    }
+
+    function validLearnerCreate() {
+      return currentRole() in [
+          "Principal",
+          "Master Teacher",
+          "Head Teacher",
+          "Teacher",
+          "Administrative Assistant"
+        ]
+        && validLearnerMonitoringValues()
+        && request.resource.data.createdByUid == request.auth.uid
+        && request.resource.data.createdByName is string
+        && request.resource.data.createdByName.size() > 0
+        && request.resource.data.createdByRole == currentRole();
+    }
+
+    function validLearnerOwnerEdit() {
+      return isLearnerMonitorRole()
+        && validLearnerMonitoringValues()
+        && (
+          resource.data.createdByUid == request.auth.uid
+          || currentRole() == "Administrative Assistant"
+        )
+        && request.resource.data.createdByUid == resource.data.createdByUid
+        && request.resource.data.createdByName == resource.data.createdByName
+        && request.resource.data.createdByRole == resource.data.createdByRole
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          "learnerName",
+          "lrn",
+          "gradeLevel",
+          "section",
+          "adviserUid",
+          "adviserName",
+          "concernType",
+          "concernDescription",
+          "riskLevel",
+          "attendanceStatus",
+          "readingLevel",
+          "numeracyLevel",
+          "interventionProvided",
+          "interventionDate",
+          "interventionStatus",
+          "parentContacted",
+          "parentCommunicationNotes",
+          "homeVisitationConducted",
+          "homeVisitationDate",
+          "behaviorIncident",
+          "violenceIncident",
+          "incompleteRequirements",
+          "healthWelfareConcern",
+          "dropoutRisk",
+          "transferConcern",
+          "status",
+          "remarks",
+          "updatedAt"
+        ]);
+    }
+
+    function validLearnerInterventionUpdate() {
+      return validLearnerMonitoringValues()
+        && currentRole() in ["Principal", "Master Teacher", "Head Teacher", "Registrar", "Administrative Assistant"]
+        && canReadLearnerRecord()
+        && request.resource.data.createdByUid == resource.data.createdByUid
+        && request.resource.data.createdByName == resource.data.createdByName
+        && request.resource.data.createdByRole == resource.data.createdByRole
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          "interventionProvided",
+          "interventionDate",
+          "interventionStatus",
+          "status",
+          "remarks",
+          "updatedAt"
+        ]);
+    }
+
+    function canReadObservationRecord() {
+      return signedIn()
+        && userDoc(request.auth.uid).data.status == "approved"
+        && (
+          isApprovedPrincipal()
+          || resource.data.teacherUid == request.auth.uid
+          || resource.data.observerUid == request.auth.uid
+          || resource.data.createdByUid == request.auth.uid
+        );
+    }
+
+    function validObservationFields() {
+      return request.resource.data.keys().hasOnly([
+        "teacherUid",
+        "teacherName",
+        "observerUid",
+        "observerName",
+        "observerRole",
+        "subject",
+        "gradeLevel",
+        "section",
+        "observationDate",
+        "observationTime",
+        "observationType",
+        "status",
+        "preObservationNotes",
+        "postObservationNotes",
+        "observationReportLink",
+        "remarks",
+        "createdByUid",
+        "createdByName",
+        "createdAt",
+        "updatedAt"
+      ]);
+    }
+
+    function validObservationValues() {
+      return validObservationFields()
+        && request.resource.data.teacherUid is string
+        && request.resource.data.teacherUid.size() > 0
+        && request.resource.data.teacherName is string
+        && request.resource.data.teacherName.size() > 0
+        && request.resource.data.observerUid is string
+        && request.resource.data.observerName is string
+        && request.resource.data.observerName.size() > 0
+        && request.resource.data.observerRole in ["Principal", "Master Teacher", "Head Teacher"]
+        && request.resource.data.subject is string
+        && request.resource.data.subject.size() > 0
+        && request.resource.data.gradeLevel is string
+        && request.resource.data.gradeLevel.size() > 0
+        && request.resource.data.section is string
+        && request.resource.data.section.size() > 0
+        && request.resource.data.observationDate is string
+        && request.resource.data.observationDate.size() > 0
+        && request.resource.data.observationTime is string
+        && request.resource.data.observationTime.size() > 0
+        && validObservationType(request.resource.data.observationType)
+        && validObservationStatus(request.resource.data.status)
+        && request.resource.data.preObservationNotes is string
+        && request.resource.data.postObservationNotes is string
+        && request.resource.data.observationReportLink is string
+        && request.resource.data.remarks is string
+        && request.resource.data.createdByUid is string
+        && request.resource.data.createdByName is string
+        && request.resource.data.createdByName.size() > 0;
+    }
+
+    function validObservationCreate() {
+      return isAssignmentCreator()
+        && validObservationValues()
+        && request.resource.data.observerUid == request.auth.uid
+        && request.resource.data.createdByUid == request.auth.uid
+        && request.resource.data.observerRole == currentRole();
+    }
+
+    function validObservationCreatorEdit() {
+      return isAssignmentCreator()
+        && validObservationValues()
+        && (resource.data.createdByUid == request.auth.uid || isApprovedPrincipal())
+        && request.resource.data.createdByUid == resource.data.createdByUid
+        && request.resource.data.createdByName == resource.data.createdByName
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          "teacherUid",
+          "teacherName",
+          "observerUid",
+          "observerName",
+          "observerRole",
+          "subject",
+          "gradeLevel",
+          "section",
+          "observationDate",
+          "observationTime",
+          "observationType",
+          "status",
+          "preObservationNotes",
+          "postObservationNotes",
+          "observationReportLink",
+          "remarks",
+          "updatedAt"
+        ]);
+    }
+
+    function validObservationStatusUpdate() {
+      return isAssignmentCreator()
+        && validObservationValues()
+        && (resource.data.observerUid == request.auth.uid || isApprovedPrincipal())
+        && request.resource.data.createdByUid == resource.data.createdByUid
+        && request.resource.data.createdByName == resource.data.createdByName
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          "status",
+          "postObservationNotes",
+          "observationReportLink",
+          "remarks",
+          "updatedAt"
+        ]);
+    }
+
+    function validObservationTeacherPreNotes() {
+      return validObservationValues()
+        && resource.data.teacherUid == request.auth.uid
+        && request.resource.data.createdByUid == resource.data.createdByUid
+        && request.resource.data.createdByName == resource.data.createdByName
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          "preObservationNotes",
+          "updatedAt"
+        ]);
+    }
+
+    function isApprovedRegistrar() {
+      return signedIn()
+        && userDoc(request.auth.uid).data.status == "approved"
+        && (
+          currentRole() == "Registrar"
+          || currentRole() == "Principal"
+        );
+    }
+
+    function validEnrollmentRecordFields() {
+      return request.resource.data.keys().hasOnly([
+        "lrn",
+        "learnerName",
+        "sex",
+        "gradeLevel",
+        "section",
+        "adviserName",
+        "schoolYear",
+        "enrollmentStatus",
+        "enrollmentDate",
+        "createdByUid",
+        "createdByName",
+        "createdAt",
+        "updatedAt"
+      ]);
+    }
+
+    function validEnrollmentRecordValues() {
+      return validEnrollmentRecordFields()
+        && validLrn(request.resource.data.lrn)
+        && request.resource.data.learnerName is string
+        && request.resource.data.learnerName.size() > 0
+        && request.resource.data.sex in ["Male", "Female"]
+        && request.resource.data.gradeLevel is string
+        && request.resource.data.gradeLevel.size() > 0
+        && request.resource.data.section is string
+        && request.resource.data.section.size() > 0
+        && request.resource.data.adviserName is string
+        && request.resource.data.schoolYear is string
+        && request.resource.data.schoolYear.size() > 0
+        && validEnrollmentStatus(request.resource.data.enrollmentStatus)
+        && request.resource.data.enrollmentDate is string
+        && request.resource.data.enrollmentDate.size() > 0
+        && request.resource.data.createdByUid is string
+        && request.resource.data.createdByName is string
+        && request.resource.data.createdByName.size() > 0;
+    }
+
+    function validTransferRecordFields() {
+      return request.resource.data.keys().hasOnly([
+        "lrn",
+        "learnerName",
+        "gradeLevel",
+        "section",
+        "transferType",
+        "transferDate",
+        "receivingSchool",
+        "previousSchool",
+        "reason",
+        "remarks",
+        "createdByUid",
+        "createdByName",
+        "createdAt",
+        "updatedAt"
+      ]);
+    }
+
+    function validTransferRecordValues() {
+      return validTransferRecordFields()
+        && validLrn(request.resource.data.lrn)
+        && request.resource.data.learnerName is string
+        && request.resource.data.learnerName.size() > 0
+        && request.resource.data.gradeLevel is string
+        && request.resource.data.gradeLevel.size() > 0
+        && request.resource.data.section is string
+        && request.resource.data.section.size() > 0
+        && validTransferType(request.resource.data.transferType)
+        && request.resource.data.transferDate is string
+        && request.resource.data.transferDate.size() > 0
+        && request.resource.data.receivingSchool is string
+        && request.resource.data.previousSchool is string
+        && request.resource.data.reason is string
+        && request.resource.data.remarks is string
+        && request.resource.data.createdByUid is string
+        && request.resource.data.createdByName is string
+        && request.resource.data.createdByName.size() > 0;
+    }
+
+    function validDropoutRecordFields() {
+      return request.resource.data.keys().hasOnly([
+        "lrn",
+        "learnerName",
+        "gradeLevel",
+        "section",
+        "lastAttendanceDate",
+        "dropoutRiskLevel",
+        "interventionConducted",
+        "interventionRemarks",
+        "dropoutStatus",
+        "remarks",
+        "createdByUid",
+        "createdByName",
+        "createdAt",
+        "updatedAt"
+      ]);
+    }
+
+    function validDropoutRecordValues() {
+      return validDropoutRecordFields()
+        && validLrn(request.resource.data.lrn)
+        && request.resource.data.learnerName is string
+        && request.resource.data.learnerName.size() > 0
+        && request.resource.data.gradeLevel is string
+        && request.resource.data.gradeLevel.size() > 0
+        && request.resource.data.section is string
+        && request.resource.data.section.size() > 0
+        && request.resource.data.lastAttendanceDate is string
+        && validDropoutRiskLevel(request.resource.data.dropoutRiskLevel)
+        && request.resource.data.interventionConducted is string
+        && request.resource.data.interventionRemarks is string
+        && validDropoutStatus(request.resource.data.dropoutStatus)
+        && request.resource.data.remarks is string
+        && request.resource.data.createdByUid is string
+        && request.resource.data.createdByName is string
+        && request.resource.data.createdByName.size() > 0;
+    }
+
+    function validClassProfileFields() {
+      return request.resource.data.keys().hasOnly([
+        "gradeLevel",
+        "section",
+        "adviserName",
+        "totalMale",
+        "totalFemale",
+        "totalLearners",
+        "learnersAtRiskCount",
+        "transferredCount",
+        "dropoutCount",
+        "schoolYear",
+        "createdByUid",
+        "createdByName",
+        "createdAt",
+        "updatedAt"
+      ]);
+    }
+
+    function validClassProfileValues() {
+      return validClassProfileFields()
+        && request.resource.data.gradeLevel is string
+        && request.resource.data.gradeLevel.size() > 0
+        && request.resource.data.section is string
+        && request.resource.data.section.size() > 0
+        && request.resource.data.adviserName is string
+        && request.resource.data.adviserName.size() > 0
+        && request.resource.data.totalMale is number
+        && request.resource.data.totalFemale is number
+        && request.resource.data.totalLearners is number
+        && request.resource.data.learnersAtRiskCount is number
+        && request.resource.data.transferredCount is number
+        && request.resource.data.dropoutCount is number
+        && request.resource.data.schoolYear is string
+        && request.resource.data.schoolYear.size() > 0
+        && request.resource.data.createdByUid is string
+        && request.resource.data.createdByName is string
+        && request.resource.data.createdByName.size() > 0;
+    }
+
+    function validRegistrarCreate() {
+      return isApprovedRegistrar()
+        && request.resource.data.createdByUid == request.auth.uid
+        && request.resource.data.createdByName is string
+        && request.resource.data.createdByName.size() > 0;
+    }
+
+    function validRegistrarUpdate() {
+      return isApprovedRegistrar()
+        && request.resource.data.createdByUid == resource.data.createdByUid
+        && request.resource.data.createdByName == resource.data.createdByName
+        && request.resource.data.createdAt == resource.data.createdAt;
+    }
+
+    function canReadDocument() {
+      return isDocumentRole()
+        && (
+          currentRole() == "Principal"
+          || resource.data.uploadedByUid == request.auth.uid
+          || currentRole() in resource.data.visibilityRoles
+        );
+    }
+
+    function canManageDocument() {
+      return isDocumentRole()
+        && (
+          currentRole() in ["Principal", "Administrative Assistant"]
+          || resource.data.uploadedByUid == request.auth.uid
+        );
+    }
+
+    function validDocumentFields() {
+      return request.resource.data.keys().hasOnly([
+        "documentTitle",
+        "documentCategory",
+        "documentDescription",
+        "documentLink",
+        "schoolYear",
+        "uploadedByUid",
+        "uploadedByName",
+        "uploadedByRole",
+        "visibilityRoles",
+        "tags",
+        "remarks",
+        "createdAt",
+        "updatedAt"
+      ]);
+    }
+
+    function validDocumentValues() {
+      return validDocumentFields()
+        && request.resource.data.documentTitle is string
+        && request.resource.data.documentTitle.size() > 0
+        && validDocumentCategory(request.resource.data.documentCategory)
+        && request.resource.data.documentDescription is string
+        && request.resource.data.documentLink is string
+        && request.resource.data.documentLink.size() > 0
+        && request.resource.data.schoolYear is string
+        && request.resource.data.uploadedByUid is string
+        && request.resource.data.uploadedByName is string
+        && request.resource.data.uploadedByName.size() > 0
+        && validRole(request.resource.data.uploadedByRole)
+        && request.resource.data.visibilityRoles is list
+        && request.resource.data.visibilityRoles.size() > 0
+        && request.resource.data.visibilityRoles.hasOnly([
+          "Principal",
+          "Master Teacher",
+          "Head Teacher",
+          "Teacher",
+          "Registrar",
+          "Administrative Officer",
+          "Administrative Assistant"
+        ])
+        && request.resource.data.tags is string
+        && request.resource.data.remarks is string;
+    }
+
+    function validDocumentCreate() {
+      return isDocumentRole()
+        && validDocumentValues()
+        && request.resource.data.uploadedByUid == request.auth.uid
+        && request.resource.data.uploadedByRole == currentRole();
+    }
+
+    function validDocumentUpdate() {
+      return canManageDocument()
+        && validDocumentValues()
+        && request.resource.data.uploadedByUid == resource.data.uploadedByUid
+        && request.resource.data.uploadedByName == resource.data.uploadedByName
+        && request.resource.data.uploadedByRole == resource.data.uploadedByRole
+        && request.resource.data.createdAt == resource.data.createdAt;
+    }
+
+    function validInventoryFacilityFields() {
+      return request.resource.data.keys().hasOnly([
+        "itemName",
+        "propertyNumber",
+        "category",
+        "location",
+        "facilityArea",
+        "personInCharge",
+        "quantity",
+        "condition",
+        "status",
+        "acquisitionDate",
+        "lastCheckedDate",
+        "remarks",
+        "encodedByUid",
+        "encodedByName",
+        "encodedByRole",
+        "createdAt",
+        "updatedAt"
+      ]);
+    }
+
+    function validInventoryFacilityValues() {
+      return validInventoryFacilityFields()
+        && request.resource.data.itemName is string
+        && request.resource.data.itemName.size() > 0
+        && request.resource.data.propertyNumber is string
+        && validInventoryCategory(request.resource.data.category)
+        && request.resource.data.location is string
+        && request.resource.data.location.size() > 0
+        && request.resource.data.facilityArea is string
+        && request.resource.data.personInCharge is string
+        && request.resource.data.personInCharge.size() > 0
+        && request.resource.data.quantity is number
+        && request.resource.data.quantity >= 0
+        && validInventoryCondition(request.resource.data.condition)
+        && validInventoryStatus(request.resource.data.status)
+        && request.resource.data.acquisitionDate is string
+        && request.resource.data.lastCheckedDate is string
+        && request.resource.data.remarks is string
+        && request.resource.data.encodedByUid is string
+        && request.resource.data.encodedByName is string
+        && request.resource.data.encodedByRole in ["Principal", "Administrative Assistant"]
+        && request.resource.data.createdAt is timestamp
+        && request.resource.data.updatedAt is timestamp;
+    }
+
+    function validInventoryFacilityCreate() {
+      return isInventoryFacilityManager()
+        && validInventoryFacilityValues()
+        && request.resource.data.encodedByUid == request.auth.uid
+        && request.resource.data.encodedByRole == currentRole();
+    }
+
+    function validInventoryFacilityUpdate() {
+      return isInventoryFacilityManager()
+        && validInventoryFacilityValues()
+        && request.resource.data.encodedByUid == request.auth.uid
+        && request.resource.data.encodedByRole == currentRole()
+        && request.resource.data.createdAt == resource.data.createdAt;
+    }
+
+    function validPpaFields() {
+      return request.resource.data.keys().hasOnly([
+        "ppaTitle",
+        "ppaCategory",
+        "monitoringQuarter",
+        "monitoringDate",
+        "schoolYear",
+        "programProponent",
+        "targetBeneficiaries",
+        "implementationStatus",
+        "accomplishmentSummary",
+        "findingsResults",
+        "recommendation",
+        "remarksTAProvided",
+        "nextSteps",
+        "movLinks",
+        "conformeSchoolHead",
+        "checklistIndicators",
+        "createdByUid",
+        "createdByName",
+        "createdByRole",
+        "createdAt",
+        "updatedAt"
+      ]);
+    }
+
+    function validPpaValues() {
+      return validPpaFields()
+        && request.resource.data.ppaTitle is string
+        && request.resource.data.ppaTitle.size() > 0
+        && validPpaCategory(request.resource.data.ppaCategory)
+        && validPpaQuarter(request.resource.data.monitoringQuarter)
+        && request.resource.data.monitoringDate is string
+        && request.resource.data.monitoringDate.size() > 0
+        && request.resource.data.schoolYear is string
+        && request.resource.data.schoolYear.size() > 0
+        && request.resource.data.programProponent is string
+        && request.resource.data.programProponent.size() > 0
+        && request.resource.data.targetBeneficiaries is string
+        && request.resource.data.targetBeneficiaries.size() > 0
+        && validPpaStatus(request.resource.data.implementationStatus)
+        && request.resource.data.accomplishmentSummary is string
+        && request.resource.data.findingsResults is string
+        && request.resource.data.recommendation is string
+        && request.resource.data.remarksTAProvided is string
+        && request.resource.data.nextSteps is string
+        && request.resource.data.movLinks is list
+        && request.resource.data.movLinks.size() == 1
+        && validGoogleDriveFolderLink(request.resource.data.movLinks[0])
+        && request.resource.data.conformeSchoolHead is string
+        && request.resource.data.checklistIndicators is list
+        && request.resource.data.checklistIndicators.size() == 18
+        && request.resource.data.createdByUid is string
+        && request.resource.data.createdByName is string
+        && request.resource.data.createdByName.size() > 0
+        && validRole(request.resource.data.createdByRole);
+    }
+
+    function validPpaCreate() {
+      return isPpaRole()
+        && validPpaValues()
+        && request.resource.data.createdByUid == request.auth.uid
+        && request.resource.data.createdByRole == currentRole();
+    }
+
+    function canUpdatePpaRecord() {
+      return isPpaRole()
+        && (
+          currentRole() == "Principal"
+          || resource.data.createdByUid == request.auth.uid
+        );
+    }
+
+    function canReadPpaRecord() {
+      return isPpaRole()
+        && (
+          currentRole() == "Principal"
+          || resource.data.createdByUid == request.auth.uid
+        );
+    }
+
+    function validPpaUpdate() {
+      return canUpdatePpaRecord()
+        && validPpaValues()
+        && (
+          currentRole() == "Principal"
+          || request.resource.data.checklistIndicators == resource.data.checklistIndicators
+        )
+        && request.resource.data.createdByUid == resource.data.createdByUid
+        && request.resource.data.createdByName == resource.data.createdByName
+        && request.resource.data.createdByRole == resource.data.createdByRole
+        && request.resource.data.createdAt == resource.data.createdAt;
+    }
+
+    function validNotificationType(notificationType) {
+      return notificationType in [
+        "report_assigned",
+        "report_submitted",
+        "report_returned",
+        "report_approved",
+        "observation_scheduled",
+        "observation_completed",
+        "learner_risk_added",
+        "learner_intervention_updated",
+        "enrollment_updated",
+        "transfer_record_added",
+        "dropout_record_added",
+        "document_uploaded",
+        "lesson_plan_submitted",
+        "lesson_plan_reviewed",
+        "pending_user_approval",
+        "user_approved",
+        "reminder_due_today",
+        "late_submission"
+      ];
+    }
+
+    function validNotificationFields() {
+      return request.resource.data.keys().hasOnly([
+        "recipientUid",
+        "recipientName",
+        "recipientRole",
+        "senderUid",
+        "senderName",
+        "senderRole",
+        "notificationType",
+        "title",
+        "message",
+        "relatedModule",
+        "relatedRecordId",
+        "actionUrl",
+        "isRead",
+        "createdAt"
+      ]);
+    }
+
+    function validNotificationCreate() {
+      return signedIn()
+        && validNotificationFields()
+        && request.resource.data.senderUid == request.auth.uid
+        && request.resource.data.recipientUid is string
+        && request.resource.data.recipientUid.size() > 0
+        && request.resource.data.recipientName is string
+        && request.resource.data.recipientName.size() > 0
+        && validRole(request.resource.data.recipientRole)
+        && request.resource.data.senderName is string
+        && request.resource.data.senderName.size() > 0
+        && request.resource.data.senderRole is string
+        && request.resource.data.senderRole.size() > 0
+        && validNotificationType(request.resource.data.notificationType)
+        && request.resource.data.title is string
+        && request.resource.data.title.size() > 0
+        && request.resource.data.message is string
+        && request.resource.data.relatedModule is string
+        && request.resource.data.relatedRecordId is string
+        && request.resource.data.actionUrl is string
+        && request.resource.data.isRead == false
+        && request.resource.data.createdAt is timestamp;
+    }
+
+    function canReadNotification() {
+      return signedIn()
+        && (
+          resource.data.recipientUid == request.auth.uid
+          || (
+            userDoc(request.auth.uid).data.status == "approved"
+            && resource.data.recipientRole == currentRole()
+            && resource.data.recipientUid == "role:" + currentRole()
+          )
+        );
+    }
+
+    function validNotificationReadUpdate() {
+      return canReadNotification()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["isRead"])
+        && request.resource.data.isRead == true;
+    }
+
+    function isAcademicManager() {
+      return signedIn()
+        && userDoc(request.auth.uid).data.status == "approved"
+        && currentRole() in ["Principal", "Registrar"];
+    }
+
+    function isRegistrar() {
+      return isApprovedRole("Registrar");
+    }
+
+    function isAcademicViewer() {
+      return signedIn()
+        && userDoc(request.auth.uid).data.status == "approved"
+        && currentRole() in ["Principal", "Master Teacher", "Head Teacher", "Registrar"];
+    }
+
+    function isTeacherAttendanceViewer() {
+      return signedIn()
+        && userDoc(request.auth.uid).data.status == "approved"
+        && currentRole() in ["Principal", "Registrar", "Administrative Officer", "Administrative Assistant"];
+    }
+
+    function isTeacherAttendanceManager() {
+      return signedIn()
+        && userDoc(request.auth.uid).data.status == "approved"
+        && currentRole() in ["Principal", "Administrative Officer", "Administrative Assistant"];
+    }
+
+    function isTeacherWorkloadViewer() {
+      return signedIn()
+        && userDoc(request.auth.uid).data.status == "approved"
+        && currentRole() in ["Principal", "Master Teacher", "Head Teacher", "Teacher"];
+    }
+
+    function canReadTeacherWorkloadRecord() {
+      return isTeacherWorkloadViewer()
+        && (
+          currentRole() in ["Principal", "Master Teacher", "Head Teacher"]
+          || resource.data.teacherId == request.auth.uid
+          || (
+            resource.data.sectionId is string
+            && get(/databases/$(database)/documents/classes/$(resource.data.sectionId)).data.adviserId == request.auth.uid
+          )
+        );
+    }
+
+    function isGradeSubmissionViewer() {
+      return signedIn()
+        && userDoc(request.auth.uid).data.status == "approved"
+        && currentRole() in ["Principal", "Master Teacher", "Head Teacher", "Teacher"];
+    }
+
+    function canReadGradeSubmissionRecord() {
+      return isGradeSubmissionViewer()
+        && (
+          currentRole() in ["Principal", "Master Teacher", "Head Teacher"]
+          || resource.data.teacherId == request.auth.uid
+          || (
+            resource.data.sectionId is string
+            && get(/databases/$(database)/documents/classes/$(resource.data.sectionId)).data.adviserId == request.auth.uid
+          )
+        );
+    }
+
+    function isAcademicMonitor() {
+      return signedIn()
+        && userDoc(request.auth.uid).data.status == "approved"
+        && currentRole() in ["Principal", "Master Teacher", "Head Teacher", "Registrar", "Teacher"];
+    }
+
+    function isAssignedAdviserByResource() {
+      return signedIn()
+        && userDoc(request.auth.uid).data.status == "approved"
+        && resource.data.adviserId == request.auth.uid;
+    }
+
+    function isAssignedClassAdviserByResource() {
+      return signedIn()
+        && userDoc(request.auth.uid).data.status == "approved"
+        && resource.data.sectionId is string
+        && get(/databases/$(database)/documents/classes/$(resource.data.sectionId)).data.adviserId == request.auth.uid;
+    }
+
+    function isAssignedAdviserByRequest() {
+      return signedIn()
+        && userDoc(request.auth.uid).data.status == "approved"
+        && request.resource.data.adviserId == request.auth.uid;
+    }
+
+    function canReadAcademicRecord() {
+      return isAcademicViewer() || isAssignedAdviserByResource() || isAssignedClassAdviserByResource();
+    }
+
+    function validClassStatus(status) {
+      return status in ["active", "archived"];
+    }
+
+    function validStudentStatus(status) {
+      return status in [
+        "active",
+        "transferred",
+        "dropped",
+        "archived",
+        "Enrolled",
+        "Dropout",
+        "Transferred Out",
+        "Transferred In",
+        "Completed",
+        "Archived"
+      ];
+    }
+
+    function validStudentAttendanceStatus(status) {
+      return status in ["Present", "Absent", "Late", "Excused"];
+    }
+
+    function validTeacherAttendanceStatus(status) {
+      return status in ["Present", "Absent"];
+    }
+
+    function validAssessmentTerm(term) {
+      return term in ["Term 1", "Term 2", "Term 3"];
+    }
+
+    function validClassBase() {
+      return request.resource.data.schoolYear is string
+        && request.resource.data.gradeLevel is string
+        && request.resource.data.sectionName is string
+        && request.resource.data.adviserId is string
+        && request.resource.data.adviserName is string
+        && request.resource.data.totalStudents is number
+        && validClassStatus(request.resource.data.status)
+        && request.resource.data.createdByUid is string
+        && request.resource.data.createdByName is string
+        && request.resource.data.createdByName.size() > 0
+        && request.resource.data.createdAt is timestamp
+        && request.resource.data.updatedAt is timestamp;
+    }
+
+    function validClassCreate() {
+      return validClassBase()
+        && request.resource.data.createdByUid == request.auth.uid;
+    }
+
+    function validClassUpdate() {
+      return validClassBase()
+        && request.resource.data.createdByUid == resource.data.createdByUid
+        && request.resource.data.createdByName == resource.data.createdByName
+        && request.resource.data.createdAt == resource.data.createdAt;
+    }
+
+    function validSchoolSubjectBase() {
+      return request.resource.data.subjectName is string
+        && request.resource.data.subjectName.size() > 0
+        && request.resource.data.subjectArea is string
+        && request.resource.data.gradeLevel is string
+        && request.resource.data.gradeLevel.size() > 0
+        && request.resource.data.sectionId is string
+        && request.resource.data.sectionName is string
+        && request.resource.data.weeklyHours is number
+        && validClassStatus(request.resource.data.status)
+        && request.resource.data.createdByUid is string
+        && request.resource.data.createdByName is string
+        && request.resource.data.createdByName.size() > 0
+        && request.resource.data.createdAt is timestamp
+        && request.resource.data.updatedAt is timestamp;
+    }
+
+    function validSchoolSubjectCreate() {
+      return validSchoolSubjectBase()
+        && request.resource.data.createdByUid == request.auth.uid;
+    }
+
+    function validSchoolSubjectUpdate() {
+      return validSchoolSubjectBase()
+        && request.resource.data.createdByUid == resource.data.createdByUid
+        && request.resource.data.createdByName == resource.data.createdByName
+        && request.resource.data.createdAt == resource.data.createdAt;
+    }
+
+    function validStudentBase() {
+      return validLrn(request.resource.data.lrn)
+        && request.resource.data.lastName is string
+        && request.resource.data.firstName is string
+        && request.resource.data.sex is string
+        && request.resource.data.gradeLevel is string
+        && request.resource.data.sectionId is string
+        && request.resource.data.sectionName is string
+        && request.resource.data.adviserId is string
+        && request.resource.data.schoolYear is string
+        && request.resource.data.term is string
+        && validStudentStatus(request.resource.data.status)
+        && request.resource.data.createdByUid is string
+        && request.resource.data.createdByName is string
+        && request.resource.data.createdByName.size() > 0
+        && request.resource.data.createdAt is timestamp
+        && request.resource.data.updatedAt is timestamp;
+    }
+
+    function validStudentCreate() {
+      return validStudentBase()
+        && request.resource.data.createdByUid == request.auth.uid;
+    }
+
+    function validStudentUpdate() {
+      return validStudentBase()
+        && request.resource.data.createdByUid == resource.data.createdByUid
+        && request.resource.data.createdByName == resource.data.createdByName
+        && request.resource.data.createdAt == resource.data.createdAt;
+    }
+
+    function validStudentAttendanceWrite() {
+      return request.resource.data.sectionId is string
+        && request.resource.data.studentId is string
+        && request.resource.data.studentName is string
+        && request.resource.data.attendanceDate is string
+        && request.resource.data.adviserId == request.auth.uid
+        && validStudentAttendanceStatus(request.resource.data.status)
+        && request.resource.data.encodedBy == request.auth.uid;
+    }
+
+    function validTeacherAttendanceWrite() {
+      return request.resource.data.teacherId is string
+        && request.resource.data.teacherName is string
+        && request.resource.data.attendanceDate is string
+        && validTeacherAttendanceStatus(request.resource.data.status)
+        && request.resource.data.encodedBy == request.auth.uid;
+    }
+
+    function validTeacherWorkloadWrite() {
+      return isApprovedPrincipal()
+        && request.resource.data.teacherId is string
+        && request.resource.data.teacherName is string
+        && request.resource.data.subjectId is string
+        && request.resource.data.subjectName is string
+        && request.resource.data.subjectArea is string
+        && request.resource.data.sectionId is string
+        && request.resource.data.sectionName is string
+        && request.resource.data.gradeLevel is string
+        && request.resource.data.weeklyHours is number
+        && request.resource.data.preparations is number
+        && request.resource.data.description is string
+        && request.resource.data.assignedByUid == request.auth.uid
+        && request.resource.data.assignedByName is string
+        && request.resource.data.createdAt is timestamp
+        && request.resource.data.updatedAt is timestamp;
+    }
+
+    function validAncillaryAssignmentWrite() {
+      return isApprovedPrincipal()
+        && request.resource.data.teacherId is string
+        && request.resource.data.teacherName is string
+        && request.resource.data.dutyName is string
+        && request.resource.data.equivalentHours is number
+        && request.resource.data.description is string
+        && request.resource.data.assignedByUid == request.auth.uid
+        && request.resource.data.assignedByName is string
+        && request.resource.data.createdAt is timestamp
+        && request.resource.data.updatedAt is timestamp;
+    }
+
+    function validGradeSubmissionWrite() {
+      return isGradeSubmissionViewer()
+        && currentRole() in ["Teacher", "Master Teacher", "Head Teacher"]
+        && request.resource.data.workloadId is string
+        && get(/databases/$(database)/documents/teacherWorkloads/$(request.resource.data.workloadId)).data.teacherId == request.auth.uid
+        && request.resource.data.teacherId == request.auth.uid
+        && request.resource.data.teacherName is string
+        && request.resource.data.subjectName is string
+        && request.resource.data.subjectArea is string
+        && request.resource.data.sectionId is string
+        && request.resource.data.sectionName is string
+        && request.resource.data.gradeLevel is string
+        && request.resource.data.schoolYear is string
+        && request.resource.data.adviserId is string
+        && request.resource.data.studentId is string
+        && request.resource.data.studentName is string
+        && validAssessmentTerm(request.resource.data.term)
+        && request.resource.data.grade is number
+        && request.resource.data.grade >= 0
+        && request.resource.data.grade <= 100
+        && request.resource.data.encodedBy == request.auth.uid
+        && request.resource.data.encodedByName is string
+        && request.resource.data.createdAt is timestamp
+        && request.resource.data.updatedAt is timestamp;
+    }
+
+    function validLessonPlanSubmit() {
+      return isTeacherWorkloadViewer()
+        && currentRole() in ["Teacher", "Master Teacher", "Head Teacher"]
+        && request.resource.data.workloadId is string
+        && get(/databases/$(database)/documents/teacherWorkloads/$(request.resource.data.workloadId)).data.teacherId == request.auth.uid
+        && request.resource.data.teacherId == request.auth.uid
+        && request.resource.data.teacherName is string
+        && request.resource.data.teacherRole in ["Teacher", "Master Teacher", "Head Teacher"]
+        && request.resource.data.subjectName is string
+        && request.resource.data.subjectArea is string
+        && request.resource.data.sectionId is string
+        && request.resource.data.sectionName is string
+        && request.resource.data.gradeLevel is string
+        && request.resource.data.schoolYear is string
+        && validAssessmentTerm(request.resource.data.term)
+        && request.resource.data.weekNumber is number
+        && request.resource.data.weekNumber >= 1
+        && request.resource.data.weekNumber <= 10
+        && request.resource.data.weekStart is string
+        && request.resource.data.submissionType in ["Hard Copy", "Soft Copy"]
+        && request.resource.data.fileLink is string
+        && request.resource.data.teacherRemarks is string
+        && request.resource.data.status == "Submitted"
+        && request.resource.data.submittedAt is timestamp
+        && request.resource.data.updatedAt is timestamp;
+    }
+
+    function validLessonPlanOwnerUpdate() {
+      return validLessonPlanSubmit()
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.workloadId == resource.data.workloadId
+        && request.resource.data.teacherId == resource.data.teacherId
+        && request.resource.data.weekStart == resource.data.weekStart;
+    }
+
+    function validLessonPlanReviewUpdate() {
+      return signedIn()
+        && userDoc(request.auth.uid).data.status == "approved"
+        && currentRole() in ["Principal", "Master Teacher", "Head Teacher"]
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          "status",
+          "reviewTag",
+          "reviewerRemarks",
+          "reviewedByUid",
+          "reviewedByName",
+          "reviewedByRole",
+          "reviewedAt",
+          "updatedAt"
+        ])
+        && request.resource.data.status in ["Noted", "Confirmed", "Returned for Revision"]
+        && request.resource.data.reviewTag is string
+        && request.resource.data.reviewerRemarks is string
+        && request.resource.data.reviewedByUid == request.auth.uid
+        && request.resource.data.reviewedByName is string
+        && request.resource.data.reviewedByRole == currentRole()
+        && request.resource.data.reviewedAt is timestamp
+        && request.resource.data.updatedAt is timestamp;
+    }
+
+    function validAssessmentWrite() {
+      return request.resource.data.schoolYear is string
+        && validAssessmentTerm(request.resource.data.term)
+        && request.resource.data.sectionId is string
+        && request.resource.data.studentId is string
+        && request.resource.data.adviserId == request.auth.uid
+        && request.resource.data.preTestScore is number
+        && request.resource.data.postTestScore is number
+        && request.resource.data.preHighestPossibleScore is number
+        && request.resource.data.postHighestPossibleScore is number
+        && request.resource.data.highestPossibleScore is number
+        && request.resource.data.preTestScore >= 0
+        && request.resource.data.postTestScore >= 0
+        && request.resource.data.preHighestPossibleScore >= 0
+        && request.resource.data.postHighestPossibleScore >= 0
+        && (
+          (request.resource.data.preHighestPossibleScore == 0 && request.resource.data.preTestScore == 0)
+          || request.resource.data.preTestScore <= request.resource.data.preHighestPossibleScore
+        )
+        && (
+          (request.resource.data.postHighestPossibleScore == 0 && request.resource.data.postTestScore == 0)
+          || request.resource.data.postTestScore <= request.resource.data.postHighestPossibleScore
+        )
+        && request.resource.data.preTestPercentage is number
+        && request.resource.data.postTestPercentage is number
+        && request.resource.data.improvement is number
+        && request.resource.data.improvementPercentage is number
+        && request.resource.data.encodedBy == request.auth.uid;
+    }
+
+    function validTaskVisibilitySettings() {
+      return request.resource.data.keys().hasOnly([
+          "gradeTerms",
+          "assessmentScopes",
+          "lessonPlanWeeks",
+          "updatedByUid",
+          "updatedAt"
+        ])
+        && request.resource.data.gradeTerms is list
+        && request.resource.data.gradeTerms.size() > 0
+        && request.resource.data.gradeTerms.hasOnly(["Term 1", "Term 2", "Term 3"])
+        && request.resource.data.assessmentScopes is list
+        && request.resource.data.assessmentScopes.size() > 0
+        && request.resource.data.lessonPlanWeeks is list
+        && request.resource.data.lessonPlanWeeks.size() > 0
+        && request.resource.data.updatedByUid == request.auth.uid
+        && request.resource.data.updatedAt is timestamp;
+    }
+
+    function validAuditLogCreate() {
+      return signedIn()
+        && userDoc(request.auth.uid).data.status == "approved"
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.userName is string
+        && request.resource.data.role == currentRole()
+        && request.resource.data.action is string
+        && request.resource.data.targetModule is string
+        && request.resource.data.targetRecord is string
+        && request.resource.data.timestamp is timestamp;
+    }
+
+    match /users/{userId} {
+      // A signed-in user may create only their own pending account profile.
+      allow create: if signedIn() && validNewUserProfile(userId);
+
+      // Users can read their own profile. Principals and assignment creators
+      // get the minimum directory access needed by their workflows.
+      allow read: if canReadUserProfile(userId);
+
+      // Only approved Principals can approve users and assign final roles.
+      allow update: if validPrincipalApproval() || validPrincipalRoleChange(userId);
+
+      // Principals may remove user profile documents from Settings,
+      // but cannot delete their own active profile.
+      allow delete: if isApprovedPrincipal() && request.auth.uid != userId;
+    }
+
+    match /reportAssignments/{recordId} {
+      allow create: if validReportAssignmentCreate();
+
+      allow read: if signedIn()
+        && (
+          resource.data.assignedToUid == request.auth.uid
+          || resource.data.assignedByUid == request.auth.uid
+          || isApprovedPrincipal()
+        );
+
+      allow update: if validComplianceSubmit() || validReportReviewUpdate();
+
+      allow delete: if isApprovedPrincipal();
+    }
+
+    match /learnerMonitoring/{recordId} {
+      allow create: if isLearnerMonitorRole() && validLearnerCreate();
+
+      allow read: if canReadLearnerRecord();
+
+      allow update: if validLearnerOwnerEdit() || validLearnerInterventionUpdate();
+
+      allow delete: if isApprovedPrincipal();
+    }
+
+    match /classroomObservations/{recordId} {
+      allow create: if validObservationCreate();
+
+      allow read: if canReadObservationRecord();
+
+      allow update: if validObservationCreatorEdit()
+        || validObservationStatusUpdate()
+        || validObservationTeacherPreNotes();
+
+      allow delete: if isApprovedPrincipal();
+    }
+
+    match /enrollmentRecords/{recordId} {
+      allow create: if validRegistrarCreate() && validEnrollmentRecordValues();
+      allow read: if isEnrollmentMonitorRole() && currentRole() != "Teacher";
+      allow update: if validRegistrarUpdate() && validEnrollmentRecordValues();
+      allow delete: if isApprovedPrincipal();
+    }
+
+    match /transferRecords/{recordId} {
+      allow create: if validRegistrarCreate() && validTransferRecordValues();
+      allow read: if isEnrollmentMonitorRole() && currentRole() != "Teacher";
+      allow update: if validRegistrarUpdate() && validTransferRecordValues();
+      allow delete: if isApprovedPrincipal();
+    }
+
+    match /dropoutRecords/{recordId} {
+      allow create: if validRegistrarCreate() && validDropoutRecordValues();
+      allow read: if isEnrollmentMonitorRole() && currentRole() != "Teacher";
+      allow update: if validRegistrarUpdate() && validDropoutRecordValues();
+      allow delete: if isApprovedPrincipal();
+    }
+
+    match /classProfiles/{recordId} {
+      allow create: if validRegistrarCreate() && validClassProfileValues();
+      allow read: if isEnrollmentMonitorRole();
+      allow update: if validRegistrarUpdate() && validClassProfileValues();
+      allow delete: if isApprovedPrincipal();
+    }
+
+    match /documents/{recordId} {
+      allow create: if validDocumentCreate();
+      allow read: if canReadDocument();
+      allow update: if validDocumentUpdate();
+      allow delete: if canManageDocument();
+    }
+
+    match /inventoryFacilities/{recordId} {
+      allow create: if validInventoryFacilityCreate();
+      allow read: if isInventoryFacilityViewer();
+      allow update: if validInventoryFacilityUpdate();
+      allow delete: if isApprovedPrincipal();
+    }
+
+    match /financialReports/{recordId} {
+      allow create: if validFinancialCreate();
+      allow read: if isFinancialReportViewer();
+      allow update: if validFinancialManagerUpdate() || validFinancialReviewUpdate();
+      allow delete: if isFinancialReportManager();
+    }
+
+    match /ppaMonitoring/{recordId} {
+      allow create: if validPpaCreate();
+      allow read: if canReadPpaRecord();
+      allow update: if validPpaUpdate();
+      allow delete: if isApprovedPrincipal();
+    }
+
+    match /classes/{recordId} {
+      allow create: if isAcademicManager() && validClassCreate();
+      allow read: if isAcademicViewer() || isAssignedAdviserByResource();
+      allow update: if isAcademicManager() && validClassUpdate();
+      allow delete: if isApprovedPrincipal();
+    }
+
+    match /schoolSubjects/{recordId} {
+      allow create: if isApprovedPrincipal() && validSchoolSubjectCreate();
+      allow read: if isAcademicMonitor() || isTeacherWorkloadViewer();
+      allow update: if isApprovedPrincipal() && validSchoolSubjectUpdate();
+      allow delete: if isApprovedPrincipal();
+    }
+
+    match /students/{recordId} {
+      allow create: if (isRegistrar() || isApprovedPrincipal()) && validStudentCreate();
+      allow read: if canReadAcademicRecord() || isApprovedRole("Teacher");
+      allow update: if (isRegistrar() || isApprovedPrincipal()) && validStudentUpdate();
+      allow delete: if isApprovedPrincipal();
+    }
+
+    match /studentAttendance/{recordId} {
+      allow create: if validStudentAttendanceWrite();
+      allow read: if canReadAcademicRecord();
+      allow update: if (isAssignedAdviserByResource() || isAssignedClassAdviserByResource())
+        && validStudentAttendanceWrite()
+        && (
+          request.resource.data.adviserId == resource.data.adviserId
+          || request.resource.data.adviserId == request.auth.uid
+        );
+      allow delete: if isApprovedPrincipal();
+    }
+
+    match /teacherAttendance/{recordId} {
+      allow create: if isTeacherAttendanceManager() && validTeacherAttendanceWrite();
+      allow read: if isTeacherAttendanceViewer();
+      allow update: if isTeacherAttendanceManager() && validTeacherAttendanceWrite();
+      allow delete: if isApprovedPrincipal();
+    }
+
+    match /teacherWorkloads/{recordId} {
+      allow create: if validTeacherWorkloadWrite();
+      allow read: if canReadTeacherWorkloadRecord();
+      allow update: if validTeacherWorkloadWrite();
+      allow delete: if isApprovedPrincipal();
+    }
+
+    match /ancillaryAssignments/{recordId} {
+      allow create: if validAncillaryAssignmentWrite();
+      allow read: if canReadTeacherWorkloadRecord();
+      allow update: if validAncillaryAssignmentWrite();
+      allow delete: if isApprovedPrincipal();
+    }
+
+    match /gradeSubmissions/{recordId} {
+      allow create: if validGradeSubmissionWrite();
+      allow read: if canReadGradeSubmissionRecord();
+      allow update: if validGradeSubmissionWrite()
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.workloadId == resource.data.workloadId
+        && request.resource.data.teacherId == resource.data.teacherId
+        && request.resource.data.studentId == resource.data.studentId
+        && request.resource.data.term == resource.data.term;
+      allow delete: if isApprovedPrincipal();
+    }
+
+    match /lessonPlans/{recordId} {
+      allow create: if validLessonPlanSubmit()
+        && request.resource.data.createdAt is timestamp;
+      allow read: if isTeacherWorkloadViewer()
+        && (
+          currentRole() in ["Principal", "Master Teacher", "Head Teacher"]
+          || resource.data.teacherId == request.auth.uid
+        );
+      allow update: if validLessonPlanOwnerUpdate() || validLessonPlanReviewUpdate();
+      allow delete: if isApprovedPrincipal();
+    }
+
+    match /systemSettings/{recordId} {
+      allow read: if signedIn()
+        && userDoc(request.auth.uid).data.status == "approved";
+      allow create, update: if isApprovedPrincipal() && validTaskVisibilitySettings();
+      allow delete: if isApprovedPrincipal();
+    }
+
+    match /assessments/{recordId} {
+      allow create: if validAssessmentWrite();
+      allow read: if canReadAcademicRecord();
+      allow update: if (isAssignedAdviserByResource() || isAssignedClassAdviserByResource())
+        && validAssessmentWrite()
+        && (
+          request.resource.data.adviserId == resource.data.adviserId
+          || request.resource.data.adviserId == request.auth.uid
+        );
+      allow delete: if isApprovedPrincipal();
+    }
+
+    match /auditLogs/{recordId} {
+      allow create: if validAuditLogCreate();
+      allow read: if isApprovedPrincipal();
+      allow update: if false;
+      allow delete: if isApprovedPrincipal();
+    }
+
+    match /notifications/{recordId} {
+      allow create: if validNotificationCreate();
+      allow read: if canReadNotification() || isApprovedPrincipal();
+      allow update: if validNotificationReadUpdate();
+      allow delete: if isApprovedPrincipal();
+    }
+
+    // Deny all other collections until later modules define their own rules.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

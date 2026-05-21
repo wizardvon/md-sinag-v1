@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="Project SINAG - School Integrated Network for Analytics and Governance"
+    />
+    <meta name="theme-color" content="#0f2a44" />
+    <title>Project SINAG</title>
+    <link rel="manifest" href="manifest.json" />
+    <link rel="stylesheet" href="styles.css?v=20260520-10" />
+  </head>
+  <body>
+    <div id="app" class="app-shell">
+      <section id="authView" class="auth-layout">
+        <div class="auth-brand">
+          <div>
+            <p class="eyebrow">Project SINAG</p>
+            <h1>School Integrated Network for Analytics and Governance</h1>
+            <p>
+              A secure governance workspace for attendance, learner monitoring,
+              compliance, and school operations.
+            </p>
+          </div>
+        </div>
+
+        <div class="auth-panel">
+          <div class="auth-tabs" role="tablist" aria-label="Authentication forms">
+            <button id="loginTab" class="tab-button active" type="button">Login</button>
+            <button id="registerTab" class="tab-button" type="button">Register</button>
+          </div>
+
+          <form id="loginForm" class="auth-form">
+            <h2>Welcome back</h2>
+            <label for="loginEmail">Email</label>
+            <input id="loginEmail" type="email" autocomplete="email" required />
+
+            <label for="loginPassword">Password</label>
+            <input
+              id="loginPassword"
+              type="password"
+              autocomplete="current-password"
+              required
+            />
+
+            <button class="primary-button" type="submit">Login</button>
+            <button id="forgotPasswordButton" class="secondary-button auth-link-button" type="button">
+              Forgot password?
+            </button>
+          </form>
+
+          <form id="registerForm" class="auth-form hidden">
+            <h2>Request access</h2>
+            <label for="registerFullName">Full name</label>
+            <input id="registerFullName" type="text" autocomplete="name" required />
+
+            <label for="registerEmail">Email</label>
+            <input id="registerEmail" type="email" autocomplete="email" required />
+
+            <label for="registerPassword">Password</label>
+            <input
+              id="registerPassword"
+              type="password"
+              autocomplete="new-password"
+              minlength="6"
+              required
+            />
+
+            <label for="registerConfirmPassword">Confirm password</label>
+            <input
+              id="registerConfirmPassword"
+              type="password"
+              autocomplete="new-password"
+              minlength="6"
+              required
+            />
+
+            <label for="requestedRole">Requested role</label>
+            <select id="requestedRole" required></select>
+
+            <button class="primary-button" type="submit">Register</button>
+            <p class="helper-text">
+              New accounts are created with pending status until approved by the
+              Principal.
+            </p>
+          </form>
+
+          <div id="authMessage" class="message hidden" role="status"></div>
+        </div>
+      </section>
+
+      <section id="pendingView" class="pending-layout hidden">
+        <div class="pending-card">
+          <div class="status-dot"></div>
+          <h1>Account pending approval</h1>
+          <p>
+            Your registration was received. A Principal must approve your account
+            and assign your final role before you can access Project SINAG.
+          </p>
+          <button id="pendingLogoutButton" class="secondary-button" type="button">
+            Logout
+          </button>
+        </div>
+      </section>
+
+      <section id="dashboardView" class="dashboard-layout hidden">
+        <aside id="sidebar" class="sidebar">
+          <div class="brand-lockup">
+            <img src="assets/sinag_logo.png" alt="SINAG logo" class="brand-logo" />
+            <div class="brand-text">
+              <strong>Project SINAG</strong>
+              <span>Governance PWA</span>
+            </div>
+          </div>
+
+          <nav id="sidebarNav" class="sidebar-nav" aria-label="Main navigation"></nav>
+
+          <div class="sidebar-footer">
+            <button id="logoutButton" class="danger-button" type="button">Logout</button>
+          </div>
+        </aside>
+
+        <main class="main-panel">
+          <header class="topbar">
+            <button id="menuToggle" class="icon-button" type="button" aria-label="Open menu">
+              ☰
+            </button>
+            <div>
+              <p id="roleLabel" class="eyebrow">Dashboard</p>
+              <h1 id="dashboardTitle">Dashboard</h1>
+            </div>
+            <div class="topbar-actions">
+              <div class="notification-center">
+                <button
+                  id="notificationBell"
+                  class="icon-button notification-bell"
+                  type="button"
+                  aria-label="Notifications"
+                  aria-expanded="false"
+                >
+                  <span aria-hidden="true">&#128276;</span>
+                  <span id="notificationBadge" class="notification-badge hidden">0</span>
+                </button>
+                <section id="notificationDropdown" class="notification-dropdown hidden">
+                  <div class="notification-header">
+                    <div>
+                      <p class="eyebrow">Updates</p>
+                      <h2>Notifications</h2>
+                    </div>
+                    <button id="markAllNotificationsRead" class="secondary-button" type="button">
+                      Mark all read
+                    </button>
+                  </div>
+                  <div id="notificationList" class="notification-list">
+                    <p class="empty-state">Loading notifications...</p>
+                  </div>
+                </section>
+              </div>
+            </div>
+          </header>
+
+          <div id="dashboardContent" class="content-stack"></div>
+        </main>
+      </section>
+    </div>
+
+    <div id="approvalModal" class="modal-backdrop hidden" role="dialog" aria-modal="true">
+      <form id="approvalForm" class="modal">
+        <div class="modal-header">
+          <div>
+            <p class="eyebrow">User approval</p>
+            <h2 id="approvalUserName">Approve user</h2>
+          </div>
+          <button id="closeApprovalModal" class="icon-button" type="button" aria-label="Close">
+            ×
+          </button>
+        </div>
+
+        <label for="approvalRole">Final role</label>
+        <select id="approvalRole" required></select>
+        <div id="approvalMessage" class="message hidden" role="status"></div>
+
+        <div class="modal-actions">
+          <button class="secondary-button" id="cancelApproval" type="button">Cancel</button>
+          <button class="primary-button" type="submit">Approve account</button>
+        </div>
+      </form>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+    <script type="module" src="app.js?v=20260520-10"></script>
+  </body>
+</html>
