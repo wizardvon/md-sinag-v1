@@ -25,7 +25,7 @@ import {
   writeBatch,
 } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore.js";
 
-import { firebaseConfig } from "./firebase-config.js?v=20260515-1";
+let firebaseConfig = null;
 
 import {
   roles,
@@ -216,11 +216,45 @@ let calendarViewMonth = new Date().getMonth();
 let calendarViewYear = new Date().getFullYear();
 let selectedCalendarDate = todayIso();
 
-function isFirebaseConfigured() {
-  return !Object.values(firebaseConfig).some((value) => value.startsWith("YOUR_"));
+async function loadFirebaseConfig() {
+  const configCandidates = [
+    "./firebase-config.js?v=20260515-1",
+    "./firebase-config.js",
+    "./firebase-config.example.js",
+  ];
+
+  for (const path of configCandidates) {
+    try {
+      const module = await import(path);
+      if (module?.firebaseConfig) {
+        firebaseConfig = module.firebaseConfig;
+        return;
+      }
+    } catch (error) {
+      // ignore missing fallback files until we find a valid config
+    }
+  }
+
+  throw new Error("Firebase configuration file not found.");
 }
 
-function initializeFirebase() {
+function isFirebaseConfigured() {
+  return (
+    firebaseConfig &&
+    !Object.values(firebaseConfig).some((value) => value.startsWith("YOUR_"))
+  );
+}
+
+async function initializeFirebase() {
+  try {
+    await loadFirebaseConfig();
+  } catch (error) {
+    showAuthMessage(
+      "Firebase configuration file is missing. Copy firebase-config.example.js to firebase-config.js and add your Firebase values.",
+      true
+    );
+    return;
+  }
   if (!isFirebaseConfigured()) {
     showAuthMessage(
       "Add your Firebase web app values in firebase-config.js before using login or registration.",
