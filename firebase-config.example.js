@@ -1,10 +1,9 @@
-// IMPORTANT: This is a template file. DO NOT commit actual credentials!
+// Firebase Web App configuration template.
 // 
 // Setup Instructions:
 // 1. Copy this file to firebase-config.js
 // 2. Replace the placeholder values with your actual Firebase credentials
-// 3. NEVER commit firebase-config.js to git (it's in .gitignore)
-// 4. For deployment, inject these values during build or deployment process
+// 3. Commit firebase-config.js when deploying this static app to GitHub Pages
 //
 // Get your credentials from: https://console.firebase.google.com/
 // Your Firebase Project > Project Settings > Web App
