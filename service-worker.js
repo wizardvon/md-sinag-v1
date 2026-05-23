@@ -1,13 +1,13 @@
-const CACHE_VERSION = "v15";
+const CACHE_VERSION = "v16";
 const CACHE_NAME = `sinag-cache-${CACHE_VERSION}`;
 
 const APP_SHELL_ASSETS = [
   "./",
   "./index.html",
-  "./styles.css?v=20260521-1",
-  "./app.js?v=20260521-1",
-  "./constants.js?v=20260520-7",
-  "./firebase-config.js?v=20260521-1",
+  "./styles.css?v=20260523-1",
+  "./app.js?v=20260523-1",
+  "./constants.js?v=20260523-1",
+  "./firebase-config.js?v=20260523-1",
   "./manifest.json",
   "./assets/sinag_logo.png",
 ];

@@ -93,7 +93,7 @@ import {
   dashboardByRole,
   modulesByRole,
   dashboardCards,
-} from "./constants.js?v=20260520-7";
+} from "./constants.js?v=20260523-1";
 
 const els = {
   authView: document.querySelector("#authView"),
@@ -218,7 +218,7 @@ let selectedCalendarDate = todayIso();
 
 async function loadFirebaseConfig() {
   const configCandidates = [
-    "./firebase-config.js?v=20260521-1",
+    "./firebase-config.js?v=20260523-1",
     "./firebase-config.js",
     "./firebase-config.example.js",
   ];
@@ -292,8 +292,8 @@ function formatFirebaseAuthError(error) {
   const code = error?.code || "";
   const host = window.location.hostname || "this domain";
   const messages = {
-    "auth/invalid-credential": "Login failed. Check the Principal email and password, then try again.",
-    "auth/wrong-password": "Login failed. Check the Principal email and password, then try again.",
+    "auth/invalid-credential": "Login failed. Check the email and password, then try again. If this is the Principal account, confirm the account exists in Firebase Authentication and is not disabled.",
+    "auth/wrong-password": "Login failed. Check the email and password, then try again. If this is the Principal account, use Forgot password to reset it.",
     "auth/user-not-found": "No account exists for that email address.",
     "auth/user-disabled": "This Firebase Auth account is disabled.",
     "auth/operation-not-allowed": "Email/Password sign-in is disabled in Firebase Authentication.",
@@ -468,7 +468,7 @@ async function handleAuthState(user) {
     return;
   }
   if (!userSnap.exists()) {
-    showAuthMessage("No user profile document found. Contact the system administrator.", true);
+    showAuthMessage("No user profile document found. For the first Principal, create a users document with this Auth UID, role \"Principal\", and status \"approved\".", true);
     await signOut(auth);
     return;
   }

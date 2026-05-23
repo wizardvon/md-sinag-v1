@@ -49,6 +49,8 @@ role: "Principal"
 status: "approved"
 ```
 
+If the Principal login shows `auth/invalid-credential`, Firebase Authentication rejected the email/password before Firestore rules or role checks ran. In Firebase Console, confirm the Principal email exists under **Authentication > Users**, is not disabled, and reset the password if needed. Then confirm the matching `users/{uid}` Firestore document uses the same Auth UID and has `role: "Principal"` and `status: "approved"`.
+
 ## Firestore Collections
 
 - `users`
