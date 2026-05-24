@@ -93,7 +93,7 @@ import {
   dashboardByRole,
   modulesByRole,
   dashboardCards,
-} from "./constants.js?v=20260523-1";
+} from "./constants.js?v=20260523-2";
 
 const els = {
   authView: document.querySelector("#authView"),
@@ -218,7 +218,7 @@ let selectedCalendarDate = todayIso();
 
 async function loadFirebaseConfig() {
   const configCandidates = [
-    "./firebase-config.js?v=20260523-1",
+    "./firebase-config.js?v=20260523-2",
     "./firebase-config.js",
     "./firebase-config.example.js",
   ];
@@ -2218,6 +2218,32 @@ function canUserBeAssigned(user) {
   if (!user || user.status !== "approved") return false;
   if (currentUserProfile.role === "Principal") return roles.includes(user.role);
   return complianceRoles.filter((role) => role !== "Master Teacher" && role !== "Head Teacher").includes(user.role);
+}
+
+function assignmentGroupOptions() {
+  return [
+    { value: "all", label: "All personnel", roles },
+    { value: "teachers", label: "All teachers", roles: ["Teacher"] },
+    { value: "admin", label: "All admin", roles: ["Registrar", "Administrative Officer", "Administrative Assistant"] },
+    { value: "mt-ht", label: "All MT / HT", roles: ["Master Teacher", "Head Teacher"] },
+    { value: "academic-leads", label: "All academic leads", roles: ["Master Teacher", "Head Teacher", "Registrar"] },
+    { value: "operations", label: "All operations staff", roles: ["Administrative Officer", "Administrative Assistant"] },
+  ];
+}
+
+function assigneeUidsForGroup(groupValue) {
+  const group = assignmentGroupOptions().find((option) => option.value === groupValue);
+  if (!group) return [];
+  return assignableUsersCache
+    .filter((user) => group.roles.includes(user.role))
+    .map((user) => user.uid);
+}
+
+function applyAssignmentGroupSelection(groupValue) {
+  const selectedUids = new Set(assigneeUidsForGroup(groupValue));
+  document.querySelectorAll('input[name="assignedUsers"]').forEach((input) => {
+    input.checked = selectedUids.has(input.value);
+  });
 }
 
 function canSubmitAssignment(record) {
@@ -7463,6 +7489,9 @@ function requireValidLrn(lrn) {
 async function renderComplianceForm() {
   closeComplianceModal();
   assignableUsersCache = await getApprovedUsers();
+  const groupOptions = assignmentGroupOptions()
+    .map((group) => `<option value="${group.value}">${group.label}</option>`)
+    .join("");
   const assigneeOptions = assignableUsersCache
     .map(
       (user) => `
@@ -7507,6 +7536,13 @@ async function renderComplianceForm() {
           <label class="modal-field">Description<textarea id="assignmentDescription" rows="4"></textarea></label>
           <fieldset class="checkbox-group">
             <legend>Assign To</legend>
+            <div class="assignment-group-picker">
+              <label>Assign Group<select id="assignmentGroupSelect">
+                <option value="">Choose group</option>
+                ${groupOptions}
+              </select></label>
+              <button id="clearAssigneesButton" class="secondary-button" type="button">Clear</button>
+            </div>
             <div class="assignee-list">
               ${assigneeOptions || `<p class="empty-state">No approved users are available for assignment.</p>`}
             </div>
@@ -7520,6 +7556,9 @@ async function renderComplianceForm() {
       </div>
     `
   );
+  document.querySelector("#assignmentGroupSelect")?.addEventListener("change", (event) => {
+    applyAssignmentGroupSelection(event.target.value);
+  });
 }
 
 function closeComplianceModal() {
@@ -7720,9 +7759,19 @@ async function handleComplianceAction(event) {
   const submitButton = event.target.closest(".submit-compliance");
   const reviewButton = event.target.closest(".review-compliance");
   const closeButton = event.target.closest("#closeComplianceModal, #cancelComplianceForm");
+  const clearAssigneesButton = event.target.closest("#clearAssigneesButton");
 
   if (closeButton) {
     closeComplianceModal();
+    return;
+  }
+
+  if (clearAssigneesButton) {
+    document.querySelectorAll('input[name="assignedUsers"]').forEach((input) => {
+      input.checked = false;
+    });
+    const groupSelect = document.querySelector("#assignmentGroupSelect");
+    if (groupSelect) groupSelect.value = "";
     return;
   }
 

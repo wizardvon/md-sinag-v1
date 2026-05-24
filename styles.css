@@ -1972,6 +1972,25 @@ th {
   overflow: auto;
 }
 
+.assignment-group-picker {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) auto;
+  gap: 12px;
+  align-items: end;
+  margin-bottom: 12px;
+}
+
+#complianceForm {
+  max-height: none;
+  overflow: visible;
+}
+
+#complianceForm .assignee-list {
+  grid-template-columns: 1fr;
+  max-height: none;
+  overflow: visible;
+}
+
 .review-summary {
   margin: 0;
   padding: 12px;
@@ -2463,6 +2482,7 @@ th {
   .chart-grid,
   .attendance-kpi-grid,
   .assignee-list,
+  .assignment-group-picker,
   .settings-user-toolbar {
     grid-template-columns: 1fr;
   }
