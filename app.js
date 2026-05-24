@@ -151,6 +151,8 @@ let currentApprovalDocId = null;
 let currentUserProfile = null;
 let complianceRecordsCache = [];
 let filteredComplianceRecords = [];
+let filteredComplianceGroups = [];
+const expandedComplianceGroups = new Set();
 let assignableUsersCache = [];
 let learnerRecordsCache = [];
 let filteredLearnerRecords = [];
@@ -535,6 +537,10 @@ function escapeHtml(value = "") {
   return div.innerHTML;
 }
 
+function escapeAttribute(value = "") {
+  return escapeHtml(value).replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
 function displayValue(value, fallback) {
   return value ? escapeHtml(value) : `<span class="missing-field">${fallback}</span>`;
 }
@@ -669,6 +675,11 @@ function formatPeso(value) {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   })}`;
+}
+
+function toSafeNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : 0;
 }
 
 function toDateOnly(value) {
@@ -2608,12 +2619,12 @@ function canUserBeAssigned(user) {
 
 function assignmentGroupOptions() {
   return [
-    { value: "all", label: "All personnel", roles },
-    { value: "teachers", label: "All teachers", roles: ["Teacher"] },
-    { value: "admin", label: "All admin", roles: ["Registrar", "Administrative Officer", "Administrative Assistant"] },
+    { value: "all", label: "All Personnel", roles },
+    { value: "teachers", label: "All Teachers", roles: ["Teacher"] },
+    { value: "admin", label: "All Admin", roles: ["Registrar", "Administrative Officer", "Administrative Assistant"] },
     { value: "mt-ht", label: "All MT / HT", roles: ["Master Teacher", "Head Teacher"] },
-    { value: "academic-leads", label: "All academic leads", roles: ["Master Teacher", "Head Teacher", "Registrar"] },
-    { value: "operations", label: "All operations staff", roles: ["Administrative Officer", "Administrative Assistant"] },
+    { value: "academic-leads", label: "All Academic Leads", roles: ["Master Teacher", "Head Teacher", "Registrar"] },
+    { value: "operations", label: "All Operations Staff", roles: ["Administrative Officer", "Administrative Assistant"] },
   ];
 }
 
@@ -2657,13 +2668,22 @@ async function getApprovedUsers() {
 
 async function createReportAssignments(record) {
   const selectedUsers = assignableUsersCache.filter((user) => record.assignedToUids.includes(user.uid));
+  const assignmentGroupId = `assignment-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const assignedToType = record.assignedToType || (selectedUsers.length > 1 ? `${selectedUsers.length} Personnel` : "Selected Users");
+  const assignedUserIds = selectedUsers.map((user) => user.uid);
+  const assignedUserNames = selectedUsers.map((user) => user.fullName || user.email || "SINAG user");
   return Promise.all(
     selectedUsers.map(async (user) => {
       try {
         const docRef = await addDoc(collection(db, "reportAssignments"), {
+          assignmentGroupId,
           title: record.title,
           reportType: record.reportType,
           description: record.description,
+          assignedToType,
+          assignedUserIds,
+          assignedUserNames,
+          totalAssignedCount: selectedUsers.length,
           assignedByUid: auth.currentUser.uid,
           assignedByName: currentUserProfile.fullName,
           assignedByRole: currentUserProfile.role,
@@ -3411,8 +3431,8 @@ async function getVisibleFinancialReports() {
 }
 
 function normalizeFinancialRecord(data) {
-  const amountAllocated = Number(data.amountAllocated || 0);
-  const amountSpent = Number(data.amountSpent || 0);
+  const amountAllocated = toSafeNumber(data.amountAllocated);
+  const amountSpent = toSafeNumber(data.amountSpent);
   return {
     reportTitle: data.reportTitle,
     reportType: data.reportType,
@@ -7696,6 +7716,10 @@ async function renderTeacherComplianceModule() {
       </div>
     </section>
 
+    <section id="complianceAnalytics" class="attendance-analytics">
+      <p class="empty-state">Loading report assignment summary...</p>
+    </section>
+
     <section class="table-card">
       <div class="filter-grid">
         <label>
@@ -7715,8 +7739,16 @@ async function renderTeacherComplianceModule() {
           <select id="filterStatus"></select>
         </label>
         <label>
+          Compliance
+          <select id="filterComplianceStatus"></select>
+        </label>
+        <label>
           Role
           <select id="filterRole"></select>
+        </label>
+        <label>
+          Assigned Group
+          <select id="filterAssignedGroup"></select>
         </label>
         <label>
           Due Date
@@ -7749,11 +7781,16 @@ function populateComplianceFilters() {
   const reportFilter = document.querySelector("#filterReportType");
   const statusFilter = document.querySelector("#filterStatus");
   const roleFilter = document.querySelector("#filterRole");
+  const complianceFilter = document.querySelector("#filterComplianceStatus");
+  const assignedGroupFilter = document.querySelector("#filterAssignedGroup");
+  const groups = buildComplianceGroups(complianceRecordsCache);
 
   assigneeFilter.innerHTML = optionList(uniqueOptions(complianceRecordsCache, "assignedToName"), "", "All users");
   reportFilter.innerHTML = labeledOptionList(reportAssignmentTypeFilterOptions(complianceRecordsCache), "", "All report types");
   statusFilter.innerHTML = optionList(reportAssignmentStatuses, "", "All statuses");
   roleFilter.innerHTML = optionList(uniqueOptions(complianceRecordsCache, "assignedToRole"), "", "All roles");
+  complianceFilter.innerHTML = optionList(["Pending", "In Progress", "Completed", "Overdue", "Reviewed", "Approved"], "", "All compliance");
+  assignedGroupFilter.innerHTML = optionList([...new Set(groups.map((group) => group.assignedToLabel).filter(Boolean))].sort(), "", "All groups");
 }
 
 function applyComplianceFilters() {
@@ -7763,6 +7800,8 @@ function applyComplianceFilters() {
   const status = document.querySelector("#filterStatus").value;
   const role = document.querySelector("#filterRole").value;
   const dueDate = document.querySelector("#filterDueDate").value;
+  const assignedGroup = document.querySelector("#filterAssignedGroup")?.value || "";
+  const complianceStatus = document.querySelector("#filterComplianceStatus")?.value || "";
 
   filteredComplianceRecords = complianceRecordsCache.filter((record) => {
     const searchable = [
@@ -7772,6 +7811,8 @@ function applyComplianceFilters() {
       record.assignedByRole,
       record.assignedToName,
       record.assignedToRole,
+      record.assignedToType,
+      ...(record.assignedUserNames || []),
       record.reportType,
       formatReportAssignmentType(record.reportType),
       record.status,
@@ -7793,13 +7834,125 @@ function applyComplianceFilters() {
     );
   });
 
+  filteredComplianceGroups = buildComplianceGroups(filteredComplianceRecords)
+    .filter((group) => (!assignedGroup || group.assignedToLabel === assignedGroup)
+      && (!complianceStatus || group.status === complianceStatus));
+  filteredComplianceRecords = filteredComplianceGroups.flatMap((group) => group.records);
+  renderComplianceAnalytics();
   renderComplianceTable();
+}
+
+function complianceGroupKey(record) {
+  if (record.assignmentGroupId) return `group:${record.assignmentGroupId}`;
+  const createdAtMillis = record.createdAt?.toMillis?.();
+  if (!createdAtMillis) return `single:${record.id}`;
+  const allowedTypes = (record.allowedSubmissionTypes || []).join("/");
+  return [
+    "legacy",
+    record.assignedByUid || "",
+    record.title || "",
+    record.reportType || "",
+    record.dueDate || "",
+    record.description || "",
+    allowedTypes,
+    Math.floor(createdAtMillis / 600000),
+  ].join("|");
+}
+
+function buildComplianceGroups(records) {
+  const buckets = new Map();
+  records.forEach((record) => {
+    const key = complianceGroupKey(record);
+    if (!buckets.has(key)) buckets.set(key, []);
+    buckets.get(key).push(record);
+  });
+  return [...buckets.entries()]
+    .map(([key, groupRecords]) => buildComplianceGroup(groupRecords, key))
+    .sort((a, b) => {
+      const first = Math.max(...a.records.map((record) => record.updatedAt?.toMillis?.() || record.createdAt?.toMillis?.() || 0));
+      const second = Math.max(...b.records.map((record) => record.updatedAt?.toMillis?.() || record.createdAt?.toMillis?.() || 0));
+      return second - first;
+    });
+}
+
+function buildComplianceGroup(records, key = "") {
+  const sortedRecords = [...records].sort((a, b) => (a.assignedToName || "").localeCompare(b.assignedToName || ""));
+  const first = sortedRecords[0] || {};
+  const total = sortedRecords.length;
+  const submitted = sortedRecords.filter(isComplianceSubmitted).length;
+  const percentage = total ? Math.round((submitted / total) * 100) : 0;
+  const status = deriveComplianceGroupStatus(sortedRecords, submitted, total);
+  return {
+    id: key || complianceGroupKey(first),
+    records: sortedRecords,
+    title: first.title || "Untitled report",
+    reportType: first.reportType || "",
+    description: first.description || "",
+    assignedByName: first.assignedByName || "",
+    dueDate: first.dueDate || "",
+    allowedSubmissionTypes: first.allowedSubmissionTypes || [],
+    assignedToLabel: getComplianceAssignedToLabel({ records: sortedRecords }),
+    total,
+    submitted,
+    percentage,
+    status,
+  };
+}
+
+function getComplianceAssignedToLabel(group) {
+  const records = group.records || [];
+  const first = records[0] || {};
+  if (records.length <= 1) return first.assignedToName || "No assignee";
+  if (first.assignedToType && first.assignedToType !== "Selected User") return first.assignedToType;
+  const rolesInGroup = [...new Set(records.map((record) => record.assignedToRole).filter(Boolean))];
+  if (rolesInGroup.length === 1) return `${records.length} ${rolesInGroup[0]}${records.length === 1 ? "" : "s"}`;
+  return `${records.length} Personnel`;
+}
+
+function isComplianceSubmitted(record) {
+  const status = record.status || "";
+  if (["Submitted", "Received", "Checked", "Approved"].includes(status)) return true;
+  return status === "Late" && Boolean(record.submittedAt || record.submissionType || record.fileLink);
+}
+
+function deriveComplianceGroupStatus(records, submitted, total) {
+  const dueDates = records.map((record) => record.dueDate).filter(Boolean);
+  const isOverdue = dueDates.some((dueDate) => dueDate < todayIso()) && submitted < total;
+  if (isOverdue) return "Overdue";
+  if (total && records.every((record) => record.status === "Approved")) return "Approved";
+  if (total && records.every((record) => ["Received", "Checked", "Approved"].includes(record.status))) return "Reviewed";
+  if (submitted === 0) return "Pending";
+  if (submitted >= total) return "Completed";
+  return "In Progress";
+}
+
+function complianceProgressClass(percentage) {
+  if (percentage >= 100) return "success";
+  if (percentage >= 80) return "info";
+  if (percentage >= 50) return "warning";
+  return "danger";
+}
+
+function renderComplianceAnalytics() {
+  const host = document.querySelector("#complianceAnalytics");
+  if (!host) return;
+  const groups = filteredComplianceGroups;
+  const averageCompliance = groups.length
+    ? Math.round(groups.reduce((sum, group) => sum + group.percentage, 0) / groups.length)
+    : 0;
+  host.innerHTML = renderAttendanceKpiGrid([
+    ["Total Assignments", String(groups.length), "Grouped visible assignments"],
+    ["Pending Assignments", String(groups.filter((group) => group.status === "Pending").length), "No submissions yet"],
+    ["Overdue Assignments", String(groups.filter((group) => group.status === "Overdue").length), "Past due and incomplete"],
+    ["Average Compliance Rate", `${averageCompliance}%`, "Average submitted rate"],
+    ["Fully Completed Assignments", String(groups.filter((group) => ["Completed", "Reviewed", "Approved"].includes(group.status)).length), "100% submitted"],
+  ]);
 }
 
 function renderComplianceTable() {
   const tableHost = document.querySelector("#complianceTableHost");
 
-  if (!filteredComplianceRecords.length) {
+  if (!filteredComplianceGroups.length) {
     tableHost.innerHTML = `<p class="empty-state">No report assignments match the current view.</p>`;
     return;
   }
@@ -7808,62 +7961,113 @@ function renderComplianceTable() {
     <table class="compliance-table">
       <thead>
         <tr>
-          <th>Assigned User</th>
-          <th>Report</th>
-          <th>Due</th>
+          <th>Title</th>
+          <th>Category</th>
+          <th>Assigned To</th>
+          <th>Due Date</th>
+          <th>Submitted</th>
+          <th>Compliance</th>
           <th>Status</th>
-          <th>Submission</th>
-          <th>Review</th>
-          <th>Action</th>
+          <th>Actions</th>
         </tr>
       </thead>
       <tbody>
-        ${filteredComplianceRecords.map(renderComplianceRow).join("")}
+        ${filteredComplianceGroups.map(renderComplianceGroupRows).join("")}
       </tbody>
     </table>
   `;
 }
 
-function renderComplianceRow(record) {
-  const canSubmit = canSubmitAssignment(record);
-  const canReview = canReviewAssignment(record);
-  const fileLink = record.fileLink
-    ? `<a href="${escapeHtml(record.fileLink)}" target="_blank" rel="noopener">Open file</a>`
-    : `<span class="row-note">No file required</span>`;
-  const allowedTypes = (record.allowedSubmissionTypes || []).join(", ") || "Any";
+function renderComplianceGroupRows(group) {
+  const isExpanded = expandedComplianceGroups.has(group.id);
+  const primaryRecord = group.records.find((record) => canSubmitAssignment(record)) || group.records[0];
+  const canSubmit = primaryRecord && canSubmitAssignment(primaryRecord);
+  const canReview = group.records.some((record) => canReviewAssignment(record));
+  const allowedTypes = (group.allowedSubmissionTypes || []).join(", ") || "Any";
+  const progressClass = complianceProgressClass(group.percentage);
 
   return `
-    <tr>
+    <tr class="compliance-group-row" data-group-id="${escapeAttribute(group.id)}">
       <td>
-        ${escapeHtml(record.assignedToName || "No assignee")}
-        <small class="row-note">${escapeHtml(record.assignedToRole || "No role")}</small>
+        <button class="link-button toggle-compliance-group" type="button" data-group-id="${escapeAttribute(group.id)}" aria-expanded="${isExpanded ? "true" : "false"}">
+          ${isExpanded ? "Hide" : "Show"}
+        </button>
+        <strong>${escapeHtml(group.title)}</strong>
+        <small class="row-note">Assigned by ${escapeHtml(group.assignedByName || "Unknown")}</small>
+      </td>
+      <td>${escapeHtml(formatReportAssignmentType(group.reportType))}</td>
+      <td>
+        ${escapeHtml(group.assignedToLabel)}
+        <small class="row-note">${escapeHtml(group.total === 1 ? "Single assignment" : `${group.total} personnel`)}</small>
       </td>
       <td>
-        <strong>${escapeHtml(record.title || "Untitled report")}</strong>
-        <small class="row-note">${escapeHtml(formatReportAssignmentType(record.reportType))}</small>
-        <small class="row-note">Assigned by ${escapeHtml(record.assignedByName || "Unknown")}</small>
-      </td>
-      <td>
-        ${record.dueDate ? escapeHtml(record.dueDate) : "No due date"}
+        ${group.dueDate ? escapeHtml(group.dueDate) : "No due date"}
         <small class="row-note">Allowed: ${escapeHtml(allowedTypes)}</small>
       </td>
-      <td><span class="badge status-${statusClass(record.status)}">${escapeHtml(record.status || "Pending")}</span></td>
       <td>
-        ${escapeHtml(record.submissionType || "No submission yet")}
-        <small class="row-note">${fileLink}</small>
-        <small class="row-note">${escapeHtml(record.submissionRemarks || "No submission remarks")}</small>
+        <strong>${escapeHtml(`${group.submitted} / ${group.total}`)}</strong>
+        <small class="row-note">Submitted</small>
       </td>
       <td>
-        ${escapeHtml(record.reviewRemarks || "No review remarks")}
-        <small class="row-note">Updated ${escapeHtml(formatDate(record.updatedAt || record.createdAt))}</small>
+        <div class="compliance-progress compliance-progress-${progressClass}">
+          <span style="width: ${group.percentage}%"></span>
+        </div>
+        <strong>${escapeHtml(`${group.percentage}%`)}</strong>
       </td>
+      <td><span class="badge status-${statusClass(group.status)}">${escapeHtml(group.status)}</span></td>
       <td>
         <div class="row-actions">
-          ${canSubmit ? `<button class="secondary-button submit-compliance" type="button" data-id="${escapeHtml(record.id)}">Comply</button>` : ""}
-          ${canReview ? `<button class="secondary-button review-compliance" type="button" data-id="${escapeHtml(record.id)}">Review</button>` : ""}
+          ${canSubmit ? `<button class="secondary-button submit-compliance" type="button" data-id="${escapeHtml(primaryRecord.id)}">Comply</button>` : ""}
+          ${canReview && group.total === 1 ? `<button class="secondary-button review-compliance" type="button" data-id="${escapeHtml(primaryRecord.id)}">Review</button>` : ""}
+          <button class="secondary-button toggle-compliance-group" type="button" data-group-id="${escapeAttribute(group.id)}">${isExpanded ? "Collapse" : "Expand"}</button>
         </div>
       </td>
     </tr>
+    ${isExpanded ? renderComplianceDetailRow(group) : ""}
+  `;
+}
+
+function renderComplianceDetailRow(group) {
+  return `
+    <tr class="compliance-detail-row">
+      <td colspan="8">
+        <div class="compliance-detail-panel">
+          ${group.records.map(renderCompliancePersonDetail).join("")}
+        </div>
+      </td>
+    </tr>
+  `;
+}
+
+function renderCompliancePersonDetail(record) {
+  const fileLink = record.fileLink
+    ? `<a href="${escapeAttribute(record.fileLink)}" target="_blank" rel="noopener">Open file</a>`
+    : `<span class="row-note">No attachment</span>`;
+  const reviewer = record.reviewedByName ? `Reviewed by ${record.reviewedByName}` : "No reviewer yet";
+
+  return `
+    <article class="compliance-person-card">
+      <div>
+        <strong>${escapeHtml(record.assignedToName || "No assignee")}</strong>
+        <small class="row-note">${escapeHtml(record.assignedToRole || "No role")}</small>
+      </div>
+      <div>
+        <span class="badge status-${statusClass(record.status)}">${escapeHtml(record.status || "Not Submitted")}</span>
+        <small class="row-note">Submitted ${escapeHtml(formatDate(record.submittedAt))}</small>
+      </div>
+      <div>
+        ${escapeHtml(record.submissionRemarks || "No submission remarks")}
+        <small class="row-note">${fileLink}</small>
+      </div>
+      <div>
+        ${escapeHtml(record.reviewRemarks || "No review remarks")}
+        <small class="row-note">${escapeHtml(reviewer)}${record.reviewedAt ? ` - ${escapeHtml(formatDate(record.reviewedAt))}` : ""}</small>
+      </div>
+      <div class="row-actions">
+        ${canSubmitAssignment(record) ? `<button class="secondary-button submit-compliance" type="button" data-id="${escapeHtml(record.id)}">Comply</button>` : ""}
+        ${canReviewAssignment(record) ? `<button class="secondary-button review-compliance" type="button" data-id="${escapeHtml(record.id)}">Review</button>` : ""}
+      </div>
+    </article>
   `;
 }
 
@@ -7965,6 +8169,8 @@ function getComplianceFormData() {
     .map((input) => input.value);
   const allowedSubmissionTypes = [...document.querySelectorAll('input[name="allowedSubmissionTypes"]:checked')]
     .map((input) => input.value);
+  const selectedGroup = document.querySelector("#assignmentGroupSelect")?.value || "";
+  const groupLabel = assignmentGroupOptions().find((group) => group.value === selectedGroup)?.label;
 
   return {
     title: document.querySelector("#assignmentTitle").value.trim(),
@@ -7973,6 +8179,7 @@ function getComplianceFormData() {
     dueDate: document.querySelector("#assignmentDueDate").value,
     allowedSubmissionTypes,
     assignedToUids,
+    assignedToType: groupLabel || (assignedToUids.length > 1 ? "Selected Users" : "Selected User"),
   };
 }
 
@@ -8148,7 +8355,9 @@ function bindComplianceModuleEvents() {
     "#filterAssignee",
     "#filterReportType",
     "#filterStatus",
+    "#filterComplianceStatus",
     "#filterRole",
+    "#filterAssignedGroup",
     "#filterDueDate",
   ].forEach((selector) => document.querySelector(selector).addEventListener("input", applyComplianceFilters));
 }
@@ -8156,8 +8365,34 @@ function bindComplianceModuleEvents() {
 async function handleComplianceAction(event) {
   const submitButton = event.target.closest(".submit-compliance");
   const reviewButton = event.target.closest(".review-compliance");
+  const toggleButton = event.target.closest(".toggle-compliance-group");
+  const groupRow = event.target.closest(".compliance-group-row");
   const closeButton = event.target.closest("#closeComplianceModal, #cancelComplianceForm");
   const clearAssigneesButton = event.target.closest("#clearAssigneesButton");
+
+  if (toggleButton) {
+    const groupId = toggleButton.dataset.groupId;
+    if (expandedComplianceGroups.has(groupId)) {
+      expandedComplianceGroups.delete(groupId);
+    } else {
+      expandedComplianceGroups.add(groupId);
+    }
+    renderComplianceTable();
+    return;
+  }
+
+  if (groupRow && !event.target.closest("button, a, input, select, textarea")) {
+    const groupId = groupRow.dataset.groupId;
+    if (groupId) {
+      if (expandedComplianceGroups.has(groupId)) {
+        expandedComplianceGroups.delete(groupId);
+      } else {
+        expandedComplianceGroups.add(groupId);
+      }
+      renderComplianceTable();
+      return;
+    }
+  }
 
   if (closeButton) {
     closeComplianceModal();
@@ -8201,39 +8436,27 @@ function getComplianceExportData() {
     "Title",
     "Report Type",
     "Assigned By",
-    "Assigned By Role",
     "Assigned To",
-    "Assigned To Role",
     "Due Date",
     "Allowed Submission Types",
-    "Submission Type",
+    "Submitted",
+    "Total Assigned",
+    "Compliance",
     "Status",
-    "File Link",
-    "Submission Remarks",
-    "Review Remarks",
-    "Created At",
-    "Submitted At",
-    "Reviewed At",
-    "Updated At",
+    "Personnel Details",
   ];
-  const rows = filteredComplianceRecords.map((record) => [
-    record.title,
-    formatReportAssignmentType(record.reportType),
-    record.assignedByName,
-    record.assignedByRole,
-    record.assignedToName,
-    record.assignedToRole,
-    record.dueDate,
-    (record.allowedSubmissionTypes || []).join(" / "),
-    record.submissionType,
-    record.status,
-    record.fileLink,
-    record.submissionRemarks,
-    record.reviewRemarks,
-    formatDate(record.createdAt),
-    formatDate(record.submittedAt),
-    formatDate(record.reviewedAt),
-    formatDate(record.updatedAt),
+  const rows = filteredComplianceGroups.map((group) => [
+    group.title,
+    formatReportAssignmentType(group.reportType),
+    group.assignedByName,
+    group.assignedToLabel,
+    group.dueDate,
+    (group.allowedSubmissionTypes || []).join(" / "),
+    group.submitted,
+    group.total,
+    `${group.percentage}%`,
+    group.status,
+    group.records.map((record) => `${record.assignedToName || "No assignee"} (${record.assignedToRole || "No role"}): ${record.status || "Not Submitted"}`).join(" / "),
   ]);
   return { reportName: "Report Assignment", headers, rows };
 }
@@ -10186,8 +10409,8 @@ function renderFinancialReportAnalytics() {
   const host = document.querySelector("#financialReportAnalytics");
   if (!host) return;
   const records = filteredFinancialReportRecords;
-  const totalAllocated = records.reduce((sum, record) => sum + Number(record.amountAllocated || 0), 0);
-  const totalSpent = records.reduce((sum, record) => sum + Number(record.amountSpent || 0), 0);
+  const totalAllocated = records.reduce((sum, record) => sum + toSafeNumber(record.amountAllocated), 0);
+  const totalSpent = records.reduce((sum, record) => sum + toSafeNumber(record.amountSpent), 0);
   const remaining = totalAllocated - totalSpent;
   const pending = records.filter((record) => ["Draft", "Submitted"].includes(record.status)).length;
   const approved = records.filter((record) => record.status === "Approved").length;
@@ -10201,22 +10424,125 @@ function renderFinancialReportAnalytics() {
       ["Pending / Submitted", String(pending), "Draft or submitted records"],
       ["Approved Reports", String(approved), "Approved financial reports"],
     ])}
-    <div class="chart-grid attendance-chart-grid">
-      ${renderFinancialAmountChart("Spending by Category", records, financialCategories, "category")}
-      ${renderFinancialAmountChart("Spending by Fund Source", records, financialFundSources, "fundSource")}
-      ${renderFinancialAmountChart("Quarterly Spending Trend", records, financialQuarters, "quarter")}
+    <div class="chart-grid attendance-chart-grid financial-chart-grid">
+      ${renderFinancialPieChart("Spending by Category", records, financialCategories, "category", "Uncategorized", "No financial data available yet.")}
+      ${renderFinancialPieChart("Spending by Fund Source", records, financialFundSources, "fundSource", "Unspecified", "No fund source data available yet.")}
+      ${renderFinancialQuarterlyChart(records)}
     </div>
   `;
 }
 
-function renderFinancialAmountChart(title, records, labels, field) {
-  const rows = labels.map((label) => [
-    label,
-    records
-      .filter((record) => record[field] === label)
-      .reduce((sum, record) => sum + Number(record.amountSpent || 0), 0),
-  ]);
-  return renderSummaryChart(title, rows);
+function getFinancialAmountSpent(record) {
+  return toSafeNumber(record?.amountSpent);
+}
+
+function getFinancialGroupLabel(record, field, fallback) {
+  const value = String(record?.[field] || "").trim();
+  return value || fallback;
+}
+
+function groupFinancialSpending(records, labels, field, fallback) {
+  const orderedLabels = [...labels, fallback];
+  const totals = new Map(orderedLabels.map((label) => [label, 0]));
+
+  records.forEach((record) => {
+    const label = getFinancialGroupLabel(record, field, fallback);
+    totals.set(label, (totals.get(label) || 0) + getFinancialAmountSpent(record));
+  });
+
+  return [...totals.entries()]
+    .filter(([, value]) => value > 0)
+    .map(([label, value]) => ({ label, value }));
+}
+
+function formatFinancialPercent(value, total) {
+  if (!total) return "0%";
+  return `${((value / total) * 100).toFixed(1)}%`;
+}
+
+function renderFinancialPieChart(title, records, labels, field, fallback, emptyMessage) {
+  const rows = groupFinancialSpending(records, labels, field, fallback);
+  const total = rows.reduce((sum, row) => sum + row.value, 0);
+  if (!rows.length || total <= 0) {
+    return `
+      <article class="chart-card financial-chart-card">
+        <h3>${escapeHtml(title)}</h3>
+        <p class="empty-state">${escapeHtml(emptyMessage)}</p>
+      </article>
+    `;
+  }
+
+  let currentPercent = 0;
+  const segments = rows.map((row, index) => {
+    const share = (row.value / total) * 100;
+    const start = currentPercent;
+    currentPercent += share;
+    return `var(--financial-chart-${(index % 8) + 1}) ${start}% ${currentPercent}%`;
+  });
+
+  return `
+    <article class="chart-card financial-chart-card">
+      <h3>${escapeHtml(title)}</h3>
+      <div class="financial-pie-layout">
+        <div
+          class="financial-pie"
+          style="background: conic-gradient(${segments.join(", ")});"
+          role="img"
+          aria-label="${escapeAttribute(`${title} totaling ${formatPeso(total)}`)}"
+          title="${escapeAttribute(`${title}: ${formatPeso(total)}`)}"
+        >
+          <span>${escapeHtml(formatPeso(total))}</span>
+          <small>Total spent</small>
+        </div>
+        <div class="financial-chart-legend" aria-label="${escapeAttribute(`${title} legend`)}">
+          ${rows.map((row, index) => `
+            <div class="financial-legend-row" title="${escapeAttribute(`${row.label}: ${formatPeso(row.value)} (${formatFinancialPercent(row.value, total)})`)}">
+              <i style="background: var(--financial-chart-${(index % 8) + 1});"></i>
+              <span>${escapeHtml(row.label)}</span>
+              <strong>${escapeHtml(formatPeso(row.value))}</strong>
+              <small>${escapeHtml(formatFinancialPercent(row.value, total))}</small>
+            </div>
+          `).join("")}
+        </div>
+      </div>
+    </article>
+  `;
+}
+
+function renderFinancialQuarterlyChart(records) {
+  const rows = financialQuarters.map((quarter) => ({
+    label: quarter,
+    value: records
+      .filter((record) => record.quarter === quarter)
+      .reduce((sum, record) => sum + getFinancialAmountSpent(record), 0),
+  }));
+  const max = Math.max(...rows.map((row) => row.value), 0);
+  if (max <= 0) {
+    return `
+      <article class="chart-card financial-chart-card financial-trend-card">
+        <h3>Quarterly Spending Trend</h3>
+        <p class="empty-state">No quarterly spending data available yet.</p>
+      </article>
+    `;
+  }
+
+  return `
+    <article class="chart-card financial-chart-card financial-trend-card">
+      <h3>Quarterly Spending Trend</h3>
+      <div class="financial-bar-chart" aria-label="Quarterly Spending Trend">
+        ${rows.map((row) => {
+          const height = Math.max((row.value / max) * 100, row.value > 0 ? 6 : 0);
+          return `
+            <div class="financial-bar-column" title="${escapeAttribute(`${row.label}: ${formatPeso(row.value)}`)}">
+              <span>${escapeHtml(formatPeso(row.value))}</span>
+              <div class="financial-bar-track"><i style="height: ${height}%"></i></div>
+              <strong>${escapeHtml(row.label)}</strong>
+            </div>
+          `;
+        }).join("")}
+      </div>
+    </article>
+  `;
 }
 
 function renderFinancialReportTable(host) {

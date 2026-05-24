@@ -520,8 +520,13 @@ service cloud.firestore {
     function validReportAssignmentFields() {
       return request.resource.data.keys().hasOnly([
         "title",
+        "assignmentGroupId",
         "reportType",
         "description",
+        "assignedToType",
+        "assignedUserIds",
+        "assignedUserNames",
+        "totalAssignedCount",
         "assignedByUid",
         "assignedByName",
         "assignedByRole",
