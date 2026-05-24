@@ -2102,6 +2102,10 @@ th {
   align-items: end;
 }
 
+.calendar-filter-controls {
+  grid-template-columns: minmax(120px, 0.7fr) minmax(160px, 1fr) minmax(150px, 1fr) minmax(180px, 1.2fr);
+}
+
 .calendar-controls label {
   display: grid;
   gap: 6px;
@@ -2162,6 +2166,11 @@ th {
   outline: inset 0 0 0 2px var(--blue-600);
 }
 
+.calendar-cell.attendance-absent {
+  background: #fff1f2;
+  outline: inset 0 0 0 2px #fecdd3;
+}
+
 .calendar-cell.today > span {
   display: grid;
   width: 28px;
@@ -2215,6 +2224,11 @@ th {
   background: #fff7ed;
 }
 
+.calendar-chip.schedule {
+  color: var(--green);
+  background: #ecfdf5;
+}
+
 .calendar-chip.approval,
 .calendar-chip.notification,
 .calendar-chip.overdue {
@@ -2242,6 +2256,59 @@ th {
   font-size: 1rem;
 }
 
+.calendar-attendance-badge {
+  display: inline-flex;
+  width: fit-content;
+  padding: 4px 7px;
+  color: var(--gray-700);
+  background: var(--gray-100);
+  border: 1px solid var(--gray-200);
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 900;
+}
+
+.calendar-attendance-badge.attendance-present {
+  color: var(--green);
+  background: #ecfdf5;
+  border-color: #bbf7d0;
+}
+
+.calendar-attendance-badge.attendance-absent {
+  color: var(--red);
+  background: #fef2f2;
+  border-color: #fecaca;
+}
+
+.calendar-attendance-badge.attendance-late {
+  color: var(--amber);
+  background: #fff7ed;
+  border-color: #fed7aa;
+}
+
+.calendar-attendance-badge.attendance-on-leave {
+  color: var(--blue-600);
+  background: #eef6ff;
+  border-color: #bfdbfe;
+}
+
+.calendar-attendance-detail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.calendar-attendance-detail small {
+  color: var(--gray-500);
+  font-weight: 800;
+}
+
+.calendar-agenda {
+  display: grid;
+  gap: 10px;
+}
+
 .calendar-task-item {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -2259,6 +2326,10 @@ th {
 
 .calendar-task-item.learner {
   border-left-color: var(--amber);
+}
+
+.calendar-task-item.schedule {
+  border-left-color: var(--green);
 }
 
 .calendar-task-item.approval,

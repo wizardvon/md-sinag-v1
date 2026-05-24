@@ -26,6 +26,7 @@ export const resettableCollections = [
   "students",
   "studentAttendance",
   "teacherAttendance",
+  "calendarEvents",
   "schoolSubjects",
   "teacherWorkloads",
   "ancillaryAssignments",
@@ -41,21 +42,23 @@ export const resettableCollections = [
 
 // Report Assignment constants
 export const reportAssignmentTypes = [
-  "MPS Report",
   "DLL / Lesson Plan",
-  "Grades Submission",
   "Exam / Test Questions",
-  "Table of Specifications",
+  "Table of Specifications (TOS)",
   "Accomplishment Report",
-  "Attendance Report",
-  "Class Advisory Report",
   "Intervention Report",
-  "Enrollment Report",
-  "Transfer Report",
-  "Dropout Report",
-  "Behavior / Violence Incident Report",
-  "Financial Report",
-  "Inventory Report",
+  "DRRM Report",
+  "IPCRF Submission",
+  "201 Files Submission",
+  "LAC Report",
+  "Research Report",
+  "Brigada Eskwela Report",
+  "SIP / AIP Report",
+  "Compliance Report",
+  "Memorandum Compliance",
+  "Training / Seminar Report",
+  "School Forms Submission",
+  "Ancillary Assignment Report",
   "Other",
 ];
 
@@ -227,7 +230,19 @@ export const lessonPlanRoles = ["Principal", "Master Teacher", "Head Teacher", "
 export const inventoryFacilityRoles = ["Principal", "Head Teacher", "Administrative Assistant"];
 export const inventoryFacilityManagerRoles = ["Principal", "Administrative Assistant"];
 export const attendanceStatuses = ["Present", "Absent", "Late", "Excused"];
-export const teacherAttendanceStatuses = ["Present", "Absent"];
+export const teacherAttendanceStatuses = ["Present", "Absent", "Late", "On Leave"];
+export const calendarEventCategories = [
+  "Class Schedule",
+  "Meeting",
+  "School Activity",
+  "Deadline",
+  "Observation",
+  "Intervention",
+  "Personal Task",
+  "Other",
+];
+export const calendarEventVisibilities = ["Visible to Supervisors", "Private"];
+export const calendarEventStatuses = ["Scheduled", "Completed", "Cancelled"];
 export const ancillaryDutyOptions = [
   "ICT Coordinator",
   "Research Coordinator",

@@ -133,20 +133,22 @@ service cloud.firestore {
     function validReportAssignmentType(reportType) {
       return reportType in [
         "DLL / Lesson Plan",
-        "Grades Submission",
-        "MPS Report",
         "Exam / Test Questions",
-        "Table of Specifications",
+        "Table of Specifications (TOS)",
         "Accomplishment Report",
-        "Attendance Report",
-        "Class Advisory Report",
         "Intervention Report",
-        "Enrollment Report",
-        "Transfer Report",
-        "Dropout Report",
-        "Behavior / Violence Incident Report",
-        "Financial Report",
-        "Inventory Report",
+        "DRRM Report",
+        "IPCRF Submission",
+        "201 Files Submission",
+        "LAC Report",
+        "Research Report",
+        "Brigada Eskwela Report",
+        "SIP / AIP Report",
+        "Compliance Report",
+        "Memorandum Compliance",
+        "Training / Seminar Report",
+        "School Forms Submission",
+        "Ancillary Assignment Report",
         "Other"
       ];
     }
@@ -1544,7 +1546,38 @@ service cloud.firestore {
     }
 
     function validTeacherAttendanceStatus(status) {
-      return status in ["Present", "Absent"];
+      return status in ["Present", "Absent", "Late", "On Leave"];
+    }
+
+    function validCalendarCategory(category) {
+      return category in [
+        "Class Schedule",
+        "Meeting",
+        "School Activity",
+        "Deadline",
+        "Observation",
+        "Intervention",
+        "Personal Task",
+        "Other"
+      ];
+    }
+
+    function validCalendarVisibility(visibility) {
+      return visibility in ["Visible to Supervisors", "Private"];
+    }
+
+    function validCalendarStatus(status) {
+      return status in ["Scheduled", "Completed", "Cancelled"];
+    }
+
+    function isCalendarSupervisorFor(ownerUid) {
+      return isApprovedPrincipal()
+        || (
+          signedIn()
+          && userDoc(request.auth.uid).data.status == "approved"
+          && currentRole() in ["Master Teacher", "Head Teacher"]
+          && userDoc(ownerUid).data.role == "Teacher"
+        );
     }
 
     function validAssessmentTerm(term) {
@@ -1654,6 +1687,69 @@ service cloud.firestore {
         && request.resource.data.attendanceDate is string
         && validTeacherAttendanceStatus(request.resource.data.status)
         && request.resource.data.encodedBy == request.auth.uid;
+    }
+
+    function validCalendarEventFields() {
+      return request.resource.data.keys().hasOnly([
+        "title",
+        "description",
+        "date",
+        "startTime",
+        "endTime",
+        "category",
+        "location",
+        "visibility",
+        "status",
+        "ownerUid",
+        "ownerName",
+        "createdBy",
+        "createdByName",
+        "createdAt",
+        "updatedAt"
+      ]);
+    }
+
+    function validCalendarEventValues() {
+      return validCalendarEventFields()
+        && request.resource.data.title is string
+        && request.resource.data.title.size() > 0
+        && request.resource.data.description is string
+        && request.resource.data.date is string
+        && request.resource.data.date.size() > 0
+        && request.resource.data.startTime is string
+        && request.resource.data.endTime is string
+        && validCalendarCategory(request.resource.data.category)
+        && request.resource.data.location is string
+        && validCalendarVisibility(request.resource.data.visibility)
+        && validCalendarStatus(request.resource.data.status)
+        && request.resource.data.ownerUid is string
+        && request.resource.data.ownerName is string
+        && request.resource.data.ownerName.size() > 0
+        && request.resource.data.createdBy is string
+        && request.resource.data.createdByName is string
+        && request.resource.data.createdByName.size() > 0
+        && request.resource.data.createdAt is timestamp
+        && request.resource.data.updatedAt is timestamp;
+    }
+
+    function validCalendarEventCreate() {
+      return signedIn()
+        && userDoc(request.auth.uid).data.status == "approved"
+        && validCalendarEventValues()
+        && request.resource.data.ownerUid == request.auth.uid
+        && request.resource.data.createdBy == request.auth.uid;
+    }
+
+    function validCalendarEventOwnerUpdate() {
+      return signedIn()
+        && userDoc(request.auth.uid).data.status == "approved"
+        && resource.data.ownerUid == request.auth.uid
+        && validCalendarEventValues()
+        && request.resource.data.ownerUid == resource.data.ownerUid
+        && request.resource.data.ownerName == resource.data.ownerName
+        && request.resource.data.createdBy == resource.data.createdBy
+        && request.resource.data.createdByName == resource.data.createdByName
+        && request.resource.data.createdAt == resource.data.createdAt;
     }
 
     function validTeacherWorkloadWrite() {
@@ -1978,9 +2074,28 @@ service cloud.firestore {
 
     match /teacherAttendance/{recordId} {
       allow create: if isTeacherAttendanceManager() && validTeacherAttendanceWrite();
-      allow read: if isTeacherAttendanceViewer();
+      allow read: if isTeacherAttendanceViewer()
+        || (signedIn() && resource.data.teacherId == request.auth.uid)
+        || (
+          signedIn()
+          && userDoc(request.auth.uid).data.status == "approved"
+          && currentRole() in ["Master Teacher", "Head Teacher"]
+        );
       allow update: if isTeacherAttendanceManager() && validTeacherAttendanceWrite();
       allow delete: if isApprovedPrincipal();
+    }
+
+    match /calendarEvents/{recordId} {
+      allow create: if validCalendarEventCreate();
+      allow read: if signedIn()
+        && (
+          resource.data.ownerUid == request.auth.uid
+          || isCalendarSupervisorFor(resource.data.ownerUid)
+        );
+      allow update: if validCalendarEventOwnerUpdate();
+      allow delete: if signedIn()
+        && userDoc(request.auth.uid).data.status == "approved"
+        && resource.data.ownerUid == request.auth.uid;
     }
 
     match /teacherWorkloads/{recordId} {

@@ -72,6 +72,9 @@ import {
   inventoryFacilityManagerRoles,
   attendanceStatuses,
   teacherAttendanceStatuses,
+  calendarEventCategories,
+  calendarEventVisibilities,
+  calendarEventStatuses,
   ancillaryDutyOptions,
   inventoryCategories,
   inventoryConditions,
@@ -93,7 +96,7 @@ import {
   dashboardByRole,
   modulesByRole,
   dashboardCards,
-} from "./constants.js?v=20260523-2";
+} from "./constants.js?v=20260524-2";
 
 const els = {
   authView: document.querySelector("#authView"),
@@ -212,9 +215,17 @@ let notificationRecordsCache = [];
 let notificationUnsubscribers = [];
 let settingsUsersCache = [];
 let dashboardCalendarItemsCache = [];
+let calendarPersonnelCache = [];
+let calendarPersonalEventsCache = [];
+let calendarAttendanceRecordsCache = [];
 let calendarViewMonth = new Date().getMonth();
 let calendarViewYear = new Date().getFullYear();
 let selectedCalendarDate = todayIso();
+let selectedCalendarOwnerUid = "";
+let calendarViewMode = "month";
+let calendarCategoryFilter = "";
+let calendarAttendanceFilter = "";
+let calendarSearchTerm = "";
 
 async function loadFirebaseConfig() {
   const configCandidates = [
@@ -904,11 +915,12 @@ async function getUserCalendarItems(user) {
   if (!user || !auth) return [];
 
   const canUseReports = user.role === "Principal" || complianceRoles.includes(user.role);
-  const [reports, observations, learners, approvalItems] = await Promise.all([
+  const [reports, observations, learners, approvalItems, personalItems] = await Promise.all([
     canUseReports ? getVisibleReportAssignments() : Promise.resolve([]),
     observationRoles.includes(user.role) ? getVisibleClassroomObservations() : Promise.resolve([]),
     learnerMonitorRoles.includes(user.role) ? getVisibleLearnerRecords() : Promise.resolve([]),
     user.role === "Principal" ? getPendingApprovalCalendarItems() : Promise.resolve([]),
+    getCalendarEventsForUser(auth.currentUser.uid).catch(() => []),
   ]);
 
   const reportItems = reports
@@ -924,7 +936,7 @@ async function getUserCalendarItems(user) {
       assignedBy: record.assignedByName || "Not recorded",
       submitTo: record.assignedByName || "Not recorded",
       assignedTo: record.assignedToName || "Not recorded",
-      description: record.description || record.reportType || "Report compliance task",
+      description: record.description || formatReportAssignmentType(record.reportType) || "Report compliance task",
       module: "Report Assignment",
     }));
 
@@ -980,7 +992,9 @@ async function getUserCalendarItems(user) {
       module: record.relatedModule || "Dashboard",
     }));
 
-  return [...reportItems, ...observationItems, ...learnerItems, ...approvalItems, ...notificationItems]
+  const scheduleItems = personalItems.map(calendarEventToItem);
+
+  return [...scheduleItems, ...reportItems, ...observationItems, ...learnerItems, ...approvalItems, ...notificationItems]
     .filter((item) => item.date)
     .sort((a, b) => a.date.localeCompare(b.date));
 }
@@ -1053,7 +1067,7 @@ function renderUrgentTaskCard(task, message = "No urgent task at the moment.") {
   `;
 }
 
-function openCalendarModal() {
+async function openCalendarModal() {
   if (!document.querySelector("#calendarModal")) {
     document.body.insertAdjacentHTML(
       "beforeend",
@@ -1074,7 +1088,14 @@ function openCalendarModal() {
     );
   }
 
-  renderCalendar(calendarViewMonth, calendarViewYear, dashboardCalendarItemsCache);
+  const host = document.querySelector("#calendarModalContent");
+  if (host) host.innerHTML = `<p class="empty-state">Loading calendar...</p>`;
+  try {
+    await loadCalendarModalData();
+    renderCalendar(calendarViewMonth, calendarViewYear, getCalendarDisplayItems());
+  } catch (error) {
+    if (host) host.innerHTML = `<p class="empty-state">Unable to load calendar: ${escapeHtml(error.message)}</p>`;
+  }
 }
 
 function renderCalendar(month, year, items) {
@@ -1083,17 +1104,21 @@ function renderCalendar(month, year, items) {
   const host = document.querySelector("#calendarModalContent");
   if (!host) return;
 
-  const monthItems = filterCalendarItemsByMonth(items, month, year);
+  const displayItems = filterCalendarDisplayItems(items);
+  const monthItems = filterCalendarItemsByMonth(displayItems, month, year);
   const firstDay = new Date(year, month, 1).getDay();
   const daysInMonth = new Date(year, month + 1, 0).getDate();
   const cells = [];
   for (let index = 0; index < firstDay; index += 1) cells.push(`<div class="calendar-cell muted"></div>`);
   for (let day = 1; day <= daysInMonth; day += 1) {
     const dateKey = `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
-    const dayItems = getTasksForDate(dateKey, items);
+    const dayItems = getTasksForDate(dateKey, displayItems);
+    const attendance = getCalendarAttendanceForDate(dateKey);
+    const absentClass = attendance.status === "Absent" ? " attendance-absent" : "";
     cells.push(`
-      <button class="calendar-cell ${dateKey === selectedCalendarDate ? "selected" : ""} ${dateKey === todayIso() ? "today" : ""}" type="button" data-date="${dateKey}">
+      <button class="calendar-cell${absentClass} ${dateKey === selectedCalendarDate ? "selected" : ""} ${dateKey === todayIso() ? "today" : ""}" type="button" data-date="${dateKey}">
         <span>${day}</span>
+        ${renderCalendarAttendanceBadge(attendance)}
         <div class="calendar-cell-items">
           ${dayItems.slice(0, 3).map(renderCalendarChip).join("")}
           ${dayItems.length > 3 ? `<small>+${dayItems.length - 3} more</small>` : ""}
@@ -1109,21 +1134,179 @@ function renderCalendar(month, year, items) {
       <label>Year<select id="calendarYearSelect">${calendarYearOptions(year).map((itemYear) => `<option value="${itemYear}" ${itemYear === year ? "selected" : ""}>${itemYear}</option>`).join("")}</select></label>
       <button id="calendarToday" class="secondary-button" type="button">Today</button>
       <button id="calendarNextMonth" class="secondary-button" type="button">Next</button>
+      <button id="newCalendarEventButton" class="primary-button" type="button">Add Schedule</button>
+      ${canSelectCalendarOwner() ? `<label>View Calendar Of<select id="calendarOwnerSelect">${calendarPersonnelCache.map((person) => `<option value="${escapeHtml(person.uid || person.id)}" ${(person.uid || person.id) === selectedCalendarOwnerUid ? "selected" : ""}>${escapeHtml(person.fullName || person.email || person.uid || person.id)} (${escapeHtml(person.role || "Personnel")})</option>`).join("")}</select></label>` : ""}
+    </div>
+    <div class="calendar-controls calendar-filter-controls">
+      <label>View<select id="calendarViewMode">
+        <option value="month" ${calendarViewMode === "month" ? "selected" : ""}>Month View</option>
+        <option value="agenda" ${calendarViewMode === "agenda" ? "selected" : ""}>Agenda/List View</option>
+      </select></label>
+      <label>Category<select id="calendarCategoryFilter">${optionList(calendarEventCategories, calendarCategoryFilter, "All categories")}</select></label>
+      <label>Attendance<select id="calendarAttendanceFilter">${optionList(["Present", "Absent", "Late", "On Leave"], calendarAttendanceFilter, "All attendance")}</select></label>
+      <label>Search<input id="calendarSearch" type="search" value="${escapeHtml(calendarSearchTerm)}" placeholder="Search schedule title" /></label>
     </div>
     <div class="calendar-month-summary">
-      ${monthItems.length ? `${monthItems.length} task${monthItems.length === 1 ? "" : "s"} this month` : "No tasks in this month"}
+      ${renderCalendarSummary(monthItems)}
     </div>
-    <div class="calendar-weekdays">
-      ${["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((day) => `<span>${day}</span>`).join("")}
-    </div>
-    <div class="calendar-grid">${cells.join("")}</div>
+    ${calendarViewMode === "agenda" ? renderCalendarAgenda(monthItems) : `
+      <div class="calendar-weekdays">
+        ${["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((day) => `<span>${day}</span>`).join("")}
+      </div>
+      <div class="calendar-grid">${cells.join("")}</div>
+    `}
     <section class="calendar-day-panel">
       <h3>${escapeHtml(formatDueDate(selectedCalendarDate))}</h3>
+      ${renderCalendarAttendanceDetail(selectedCalendarDate)}
       <div id="calendarDateTasks">
-        ${renderCalendarDateTasks(selectedCalendarDate, items)}
+        ${renderCalendarDateTasks(selectedCalendarDate, displayItems)}
       </div>
     </section>
   `;
+}
+
+async function loadCalendarModalData() {
+  if (!auth?.currentUser || !currentUserProfile) return;
+  calendarPersonnelCache = await getCalendarPersonnelOptions();
+  if (!selectedCalendarOwnerUid || !calendarPersonnelCache.some((person) => (person.uid || person.id) === selectedCalendarOwnerUid)) {
+    selectedCalendarOwnerUid = auth.currentUser.uid;
+  }
+  await loadSelectedCalendarData();
+}
+
+async function loadSelectedCalendarData() {
+  if (!selectedCalendarOwnerUid) return;
+  const [events, attendance] = await Promise.all([
+    getCalendarEventsForUser(selectedCalendarOwnerUid),
+    getCalendarAttendanceForUser(selectedCalendarOwnerUid),
+  ]);
+  calendarPersonalEventsCache = events;
+  calendarAttendanceRecordsCache = attendance;
+}
+
+function getCalendarDisplayItems() {
+  const scheduleItems = calendarPersonalEventsCache.map(calendarEventToItem);
+  if (selectedCalendarOwnerUid === auth.currentUser?.uid) {
+    const existingScheduleIds = new Set(scheduleItems.map((item) => item.id));
+    return [
+      ...scheduleItems,
+      ...dashboardCalendarItemsCache.filter((item) => !existingScheduleIds.has(item.id)),
+    ];
+  }
+  return scheduleItems;
+}
+
+async function getCalendarEventsForUser(ownerUid) {
+  if (!ownerUid || !db) return [];
+  const snapshot = await getDocs(query(collection(db, "calendarEvents"), where("ownerUid", "==", ownerUid)));
+  return snapshot.docs.map(normalizeRecord);
+}
+
+async function getCalendarAttendanceForUser(ownerUid) {
+  if (!ownerUid || !db) return [];
+  try {
+    const snapshot = await getDocs(query(collection(db, "teacherAttendance"), where("teacherId", "==", ownerUid)));
+    return snapshot.docs.map(normalizeRecord);
+  } catch (error) {
+    console.warn("Unable to load calendar attendance:", error);
+    return [];
+  }
+}
+
+async function getCalendarPersonnelOptions() {
+  const self = {
+    id: auth.currentUser.uid,
+    uid: auth.currentUser.uid,
+    fullName: currentUserProfile.fullName || auth.currentUser.email,
+    email: currentUserProfile.email || auth.currentUser.email,
+    role: currentUserProfile.role,
+  };
+  if (!canSelectCalendarOwner()) return [self];
+
+  const snapshot = await getDocs(query(collection(db, "users"), where("status", "==", "approved")));
+  const users = snapshot.docs.map((userDoc) => ({ id: userDoc.id, ...userDoc.data() }));
+  const visibleUsers = users.filter(canViewCalendarUser).sort((a, b) => (a.fullName || a.email || "").localeCompare(b.fullName || b.email || ""));
+  return [...new Map([self, ...visibleUsers].map((user) => [user.uid || user.id, user])).values()];
+}
+
+function canSelectCalendarOwner(role = currentUserProfile?.role) {
+  return ["Principal", "Admin", "SuperAdmin", "Master Teacher", "Head Teacher"].includes(role);
+}
+
+function canViewCalendarUser(user) {
+  const role = currentUserProfile?.role || "";
+  if (!user || (user.uid || user.id) === auth.currentUser?.uid) return true;
+  if (["Principal", "Admin", "SuperAdmin"].includes(role)) return true;
+  if (["Master Teacher", "Head Teacher"].includes(role)) return user.role === "Teacher";
+  return false;
+}
+
+function calendarEventToItem(record) {
+  return {
+    id: `schedule-${record.id}`,
+    recordId: record.id,
+    source: "calendarEvent",
+    type: "Schedule",
+    typeClass: "schedule",
+    title: calendarEventDisplayValue(record, "title"),
+    date: record.date,
+    time: formatCalendarTimeRange(record),
+    status: record.status || "Scheduled",
+    category: record.category || "Other",
+    location: calendarEventDisplayValue(record, "location"),
+    assignedBy: record.createdByName || record.ownerName || "Not recorded",
+    submitTo: record.ownerName || "Not recorded",
+    assignedTo: record.ownerName || "Not recorded",
+    ownerUid: record.ownerUid,
+    ownerName: record.ownerName,
+    createdByName: record.createdByName,
+    description: calendarEventDisplayValue(record, "description"),
+    visibility: record.visibility || "Visible to Supervisors",
+    module: "Calendar",
+    rawRecord: record,
+  };
+}
+
+function canViewCalendarEventDetails(record) {
+  return !record || record.visibility !== "Private" || record.ownerUid === auth.currentUser?.uid;
+}
+
+function calendarEventDisplayValue(record, field) {
+  if (!canViewCalendarEventDetails(record)) return field === "title" ? "Busy" : "";
+  return record[field] || (field === "title" ? "Untitled schedule" : "");
+}
+
+function isMaskedCalendarItem(item) {
+  return item?.source === "calendarEvent"
+    && item.rawRecord?.visibility === "Private"
+    && item.ownerUid !== auth.currentUser?.uid;
+}
+
+function formatCalendarTimeRange(record) {
+  const start = record.startTime || "";
+  const end = record.endTime || "";
+  if (start && end) return `${start} - ${end}`;
+  return start || end || "";
+}
+
+function filterCalendarDisplayItems(items) {
+  return items.filter((item) => {
+    const titleText = `${item.title || ""} ${item.description || ""}`.toLowerCase();
+    const attendance = getCalendarAttendanceForDate(item.date);
+    return (!calendarCategoryFilter || item.category === calendarCategoryFilter || item.type !== "Schedule")
+      && (!calendarAttendanceFilter || attendance.status === calendarAttendanceFilter)
+      && (!calendarSearchTerm || titleText.includes(calendarSearchTerm.toLowerCase()));
+  });
+}
+
+function renderCalendarSummary(monthItems) {
+  const owner = calendarPersonnelCache.find((person) => (person.uid || person.id) === selectedCalendarOwnerUid);
+  const scheduleCount = monthItems.filter((item) => item.type === "Schedule").length;
+  const absenceCount = calendarAttendanceRecordsCache.filter((record) => {
+    const date = parseDateOnly(record.attendanceDate);
+    return record.status === "Absent" && date && date.getMonth() === calendarViewMonth && date.getFullYear() === calendarViewYear;
+  }).length;
+  return `${owner?.fullName || owner?.email || "Selected personnel"}: ${scheduleCount} schedule${scheduleCount === 1 ? "" : "s"} this month, ${absenceCount} absence${absenceCount === 1 ? "" : "s"}`;
 }
 
 function filterCalendarItemsByMonth(items, month, year) {
@@ -1135,6 +1318,70 @@ function filterCalendarItemsByMonth(items, month, year) {
 
 function getTasksForDate(date, items) {
   return items.filter((item) => item.date === date).sort((a, b) => (a.time || "").localeCompare(b.time || ""));
+}
+
+function getCalendarAttendanceForDate(date) {
+  const record = calendarAttendanceRecordsCache.find((item) => item.attendanceDate === date);
+  return {
+    status: record?.status || "",
+    remarks: record?.remarks || "",
+    record,
+  };
+}
+
+function calendarAttendanceClass(status = "") {
+  return `attendance-${status.toLowerCase().replaceAll(" ", "-")}`;
+}
+
+function renderCalendarAttendanceBadge(attendance) {
+  if (!attendance.status) return "";
+  return `<small class="calendar-attendance-badge ${calendarAttendanceClass(attendance.status)}">Attendance: ${escapeHtml(attendance.status)}</small>`;
+}
+
+function renderCalendarAttendanceDetail(date) {
+  const attendance = getCalendarAttendanceForDate(date);
+  if (!attendance.status) return "";
+  return `
+    <div class="calendar-attendance-detail">
+      ${renderCalendarAttendanceBadge(attendance)}
+      ${attendance.remarks ? `<small>${escapeHtml(attendance.remarks)}</small>` : ""}
+    </div>
+  `;
+}
+
+function renderCalendarAgenda(items) {
+  const rows = items
+    .sort((a, b) => a.date.localeCompare(b.date) || (a.time || "").localeCompare(b.time || ""))
+    .map((item) => {
+      const urgency = getUrgencyLabel(item.date, item.status);
+      if (isMaskedCalendarItem(item)) {
+        return `
+          <article class="calendar-task-item ${item.typeClass}">
+            <div>
+              <span class="badge calendar-type">Schedule</span>
+              <h4>Busy</h4>
+              <small>${escapeHtml(formatDueDate(item.date))}${item.time ? ` | ${escapeHtml(item.time)}` : ""}</small>
+            </div>
+          </article>
+        `;
+      }
+      return `
+        <article class="calendar-task-item ${item.typeClass}">
+          <div>
+            <span class="badge calendar-type">${escapeHtml(item.type)}</span>
+            <h4>${escapeHtml(item.title)}</h4>
+            <p>${escapeHtml(formatDueDate(item.date))}${item.time ? ` | ${escapeHtml(item.time)}` : ""}</p>
+            <small>${escapeHtml(item.category || item.description || "Calendar item")}</small>
+          </div>
+          <div>
+            <span class="badge status-${statusClass(item.status)}">${escapeHtml(item.status || "Pending")}</span>
+            <strong class="${urgency.className}">${escapeHtml(urgency.label)}</strong>
+          </div>
+        </article>
+      `;
+    })
+    .join("");
+  return `<div class="calendar-agenda">${rows || `<p class="empty-state">No schedules match the current filters.</p>`}</div>`;
 }
 
 function formatDueDate(date) {
@@ -1175,22 +1422,132 @@ function renderCalendarDateTasks(date, items) {
   return tasks
     .map((item) => {
       const urgency = getUrgencyLabel(item.date, item.status);
+      if (isMaskedCalendarItem(item)) {
+        return `
+          <article class="calendar-task-item ${item.typeClass}">
+            <div>
+              <span class="badge calendar-type">Schedule</span>
+              <h4>Busy</h4>
+              <small>${escapeHtml(formatDueDate(item.date))}${item.time ? ` | ${escapeHtml(item.time)}` : ""}</small>
+            </div>
+          </article>
+        `;
+      }
       return `
         <article class="calendar-task-item ${item.typeClass}">
           <div>
             <span class="badge calendar-type">${escapeHtml(item.type)}</span>
             <h4>${escapeHtml(item.title)}</h4>
             <p>${escapeHtml(item.description || "No description")}</p>
-            <small>${escapeHtml(item.time ? `${item.time} | ` : "")}${escapeHtml(item.assignedBy || "Not recorded")}</small>
+            <small>${escapeHtml(item.time ? `${item.time} | ` : "")}${escapeHtml(item.location ? `${item.location} | ` : "")}${escapeHtml(item.assignedBy || "Not recorded")}</small>
+            ${item.type === "Schedule" ? `<small>Owner: ${escapeHtml(item.ownerName || "Not recorded")} | Category: ${escapeHtml(item.category || "Other")}</small>` : ""}
           </div>
           <div>
             <span class="badge status-${statusClass(item.status)}">${escapeHtml(item.status || "Pending")}</span>
             <strong class="${urgency.className}">${escapeHtml(urgency.label)}</strong>
+            ${item.source === "calendarEvent" && item.ownerUid === auth.currentUser?.uid ? `
+              <button class="secondary-button edit-calendar-event" type="button" data-id="${escapeHtml(item.recordId)}">Edit</button>
+              <button class="danger-button delete-calendar-event" type="button" data-id="${escapeHtml(item.recordId)}">Delete</button>
+            ` : ""}
           </div>
         </article>
       `;
     })
     .join("");
+}
+
+function openCalendarEventForm(record = null) {
+  document.querySelector("#calendarEventModal")?.remove();
+  const selectedDate = record?.date || selectedCalendarDate || todayIso();
+  document.body.insertAdjacentHTML(
+    "beforeend",
+    `
+      <div id="calendarEventModal" class="modal-backdrop" role="dialog" aria-modal="true">
+        <form id="calendarEventForm" class="modal wide-modal">
+          <div class="modal-header">
+            <div><p class="eyebrow">Calendar schedule</p><h2>${record ? "Edit Schedule" : "Add Schedule"}</h2></div>
+            <button id="closeCalendarEventModal" class="icon-button" type="button" aria-label="Close">x</button>
+          </div>
+          <div class="form-grid">
+            <label>Title<input id="calendarEventTitle" required value="${escapeHtml(record?.title || "")}" /></label>
+            <label>Category<select id="calendarEventCategory" required>${optionList(calendarEventCategories, record?.category || "Meeting", "Select category")}</select></label>
+            <label>Date<input id="calendarEventDate" type="date" required value="${escapeHtml(selectedDate)}" /></label>
+            <label>Start Time<input id="calendarEventStartTime" type="time" value="${escapeHtml(record?.startTime || "")}" /></label>
+            <label>End Time<input id="calendarEventEndTime" type="time" value="${escapeHtml(record?.endTime || "")}" /></label>
+            <label>Status<select id="calendarEventStatus" required>${optionList(calendarEventStatuses, record?.status || "Scheduled", "Select status")}</select></label>
+            <label>Visibility<select id="calendarEventVisibility" required>${optionList(calendarEventVisibilities, record?.visibility || "Visible to Supervisors", "Select visibility")}</select></label>
+            <label>Location<input id="calendarEventLocation" value="${escapeHtml(record?.location || "")}" /></label>
+          </div>
+          <label class="modal-field">Description<textarea id="calendarEventDescription" rows="4">${escapeHtml(record?.description || "")}</textarea></label>
+          <div id="calendarEventMessage" class="message hidden" role="status"></div>
+          <div class="modal-actions">
+            <button id="cancelCalendarEventForm" class="secondary-button" type="button">Cancel</button>
+            <button class="primary-button" type="submit" data-id="${escapeHtml(record?.id || "")}">${record ? "Save Changes" : "Add Schedule"}</button>
+          </div>
+        </form>
+      </div>
+    `
+  );
+}
+
+function getCalendarEventFormData() {
+  return {
+    title: document.querySelector("#calendarEventTitle").value.trim(),
+    description: document.querySelector("#calendarEventDescription").value.trim(),
+    date: document.querySelector("#calendarEventDate").value,
+    startTime: document.querySelector("#calendarEventStartTime").value,
+    endTime: document.querySelector("#calendarEventEndTime").value,
+    category: document.querySelector("#calendarEventCategory").value,
+    location: document.querySelector("#calendarEventLocation").value.trim(),
+    visibility: document.querySelector("#calendarEventVisibility").value,
+    status: document.querySelector("#calendarEventStatus").value,
+  };
+}
+
+async function handleCalendarEventFormSubmit(event) {
+  event.preventDefault();
+  const message = document.querySelector("#calendarEventMessage");
+  const submitButton = event.target.querySelector(".primary-button");
+  submitButton.disabled = true;
+  try {
+    const recordId = submitButton.dataset.id;
+    const data = getCalendarEventFormData();
+    if (!data.title) throw new Error("Title is required.");
+    if (!calendarEventCategories.includes(data.category)) throw new Error("Select a valid category.");
+    if (!calendarEventVisibilities.includes(data.visibility)) throw new Error("Select a valid visibility.");
+    if (!calendarEventStatuses.includes(data.status)) throw new Error("Select a valid status.");
+    if (data.startTime && data.endTime && data.endTime < data.startTime) throw new Error("End time cannot be earlier than start time.");
+
+    if (recordId) {
+      const before = calendarPersonalEventsCache.find((item) => item.id === recordId);
+      await updateDoc(doc(db, "calendarEvents", recordId), { ...data, updatedAt: serverTimestamp() });
+      await createAuditLog("update", "Calendar", recordId, before, data);
+    } else {
+      const payload = {
+        ...data,
+        ownerUid: auth.currentUser.uid,
+        ownerName: currentUserProfile.fullName || auth.currentUser.email,
+        createdBy: auth.currentUser.uid,
+        createdByName: currentUserProfile.fullName || auth.currentUser.email,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      };
+      const created = await addDoc(collection(db, "calendarEvents"), payload);
+      await createAuditLog("create", "Calendar", created.id, null, payload);
+    }
+    document.querySelector("#calendarEventModal")?.remove();
+    selectedCalendarOwnerUid = auth.currentUser.uid;
+    await loadCalendarModalData();
+    dashboardCalendarItemsCache = await getUserCalendarItems(currentUserProfile);
+    renderCalendar(calendarViewMonth, calendarViewYear, getCalendarDisplayItems());
+    showDashboardMessage(recordId ? "Schedule updated." : "Schedule added.");
+  } catch (error) {
+    message.textContent = `Save failed: ${error.message}`;
+    message.classList.add("error");
+    message.classList.remove("hidden");
+  } finally {
+    submitButton.disabled = false;
+  }
 }
 
 function monthNames() {
@@ -1203,7 +1560,7 @@ function monthNames() {
 function calendarYearOptions(year) {
   const years = new Set();
   for (let offset = -5; offset <= 5; offset += 1) years.add(year + offset);
-  dashboardCalendarItemsCache.forEach((item) => {
+  getCalendarDisplayItems().forEach((item) => {
     const date = parseDateOnly(item.date);
     if (date) years.add(date.getFullYear());
   });
@@ -1383,7 +1740,7 @@ function getDownloadableReportDefinitions() {
       ],
       row: (record) => [
         record.title,
-        record.reportType,
+        formatReportAssignmentType(record.reportType),
         record.assignedByName,
         record.assignedToName,
         record.dueDate,
@@ -1860,7 +2217,9 @@ function syncDownloadableReportFilterOptions() {
     statusFilter.innerHTML = optionList(uniqueOptions(downloadableReportRecordsCache, definition.statusField), "", "All statuses");
   }
   if (categoryFilter) {
-    categoryFilter.innerHTML = optionList(uniqueOptions(downloadableReportRecordsCache, definition.categoryField), "", "All categories");
+    categoryFilter.innerHTML = definition.id === "reportAssignments"
+      ? labeledOptionList(reportAssignmentTypeFilterOptions(downloadableReportRecordsCache), "", "All categories")
+      : optionList(uniqueOptions(downloadableReportRecordsCache, definition.categoryField), "", "All categories");
   }
 }
 
@@ -2015,6 +2374,33 @@ function optionList(options, selected = "", placeholder = "All") {
         `<option value="${escapeHtml(option)}" ${option === selected ? "selected" : ""}>${escapeHtml(option)}</option>`
     )
     .join("")}`;
+}
+
+function labeledOptionList(options, selected = "", placeholder = "All") {
+  return `<option value="">${placeholder}</option>${options
+    .map(
+      (option) =>
+        `<option value="${escapeHtml(option.value)}" ${option.value === selected ? "selected" : ""}>${escapeHtml(option.label)}</option>`
+    )
+    .join("")}`;
+}
+
+function isCurrentReportAssignmentType(reportType = "") {
+  return reportAssignmentTypes.includes(reportType);
+}
+
+function formatReportAssignmentType(reportType = "") {
+  if (!reportType) return "No report type";
+  return isCurrentReportAssignmentType(reportType) ? reportType : `${reportType} (Legacy)`;
+}
+
+function reportAssignmentTypeFilterOptions(records = []) {
+  const legacyTypes = uniqueOptions(records, "reportType")
+    .filter((reportType) => !isCurrentReportAssignmentType(reportType));
+  return [...reportAssignmentTypes, ...legacyTypes].map((reportType) => ({
+    value: reportType,
+    label: formatReportAssignmentType(reportType),
+  }));
 }
 
 function uniqueOptions(records, field) {
@@ -2452,7 +2838,15 @@ async function refreshComplianceCounters(role) {
     updateCardValue("Pending Compliance", mine.filter((record) => pendingStatuses.includes(record.status)).length);
     updateCardValue("Approved Reports", countByStatus(mine, "Approved"));
     updateCardValue("Governance/Operations Reports", mine.filter((record) =>
-      ["Financial Report", "Inventory Report", "Accomplishment Report", "Other"].includes(record.reportType)
+      [
+        "Accomplishment Report",
+        "DRRM Report",
+        "Compliance Report",
+        "Memorandum Compliance",
+        "School Forms Submission",
+        "Ancillary Assignment Report",
+        "Other",
+      ].includes(record.reportType)
     ).length);
   } catch (error) {
     console.warn("Unable to load report assignment counters:", error);
@@ -7357,7 +7751,7 @@ function populateComplianceFilters() {
   const roleFilter = document.querySelector("#filterRole");
 
   assigneeFilter.innerHTML = optionList(uniqueOptions(complianceRecordsCache, "assignedToName"), "", "All users");
-  reportFilter.innerHTML = optionList(reportAssignmentTypes, "", "All report types");
+  reportFilter.innerHTML = labeledOptionList(reportAssignmentTypeFilterOptions(complianceRecordsCache), "", "All report types");
   statusFilter.innerHTML = optionList(reportAssignmentStatuses, "", "All statuses");
   roleFilter.innerHTML = optionList(uniqueOptions(complianceRecordsCache, "assignedToRole"), "", "All roles");
 }
@@ -7379,6 +7773,7 @@ function applyComplianceFilters() {
       record.assignedToName,
       record.assignedToRole,
       record.reportType,
+      formatReportAssignmentType(record.reportType),
       record.status,
       record.submissionType,
       record.submissionRemarks,
@@ -7445,7 +7840,7 @@ function renderComplianceRow(record) {
       </td>
       <td>
         <strong>${escapeHtml(record.title || "Untitled report")}</strong>
-        <small class="row-note">${escapeHtml(record.reportType || "No report type")}</small>
+        <small class="row-note">${escapeHtml(formatReportAssignmentType(record.reportType))}</small>
         <small class="row-note">Assigned by ${escapeHtml(record.assignedByName || "Unknown")}</small>
       </td>
       <td>
@@ -7597,6 +7992,9 @@ async function handleComplianceFormSubmit(event) {
     }
     if (data.dueDate && data.dueDate < todayIso()) {
       throw new Error("Due date cannot be earlier than today.");
+    }
+    if (!isCurrentReportAssignmentType(data.reportType)) {
+      throw new Error("Select a valid report type.");
     }
 
     await createReportAssignments(data);
@@ -7820,7 +8218,7 @@ function getComplianceExportData() {
   ];
   const rows = filteredComplianceRecords.map((record) => [
     record.title,
-    record.reportType,
+    formatReportAssignmentType(record.reportType),
     record.assignedByName,
     record.assignedByRole,
     record.assignedToName,
@@ -11953,29 +12351,63 @@ function bindEvents() {
       return;
     }
 
+    if (event.target.closest("#closeCalendarEventModal, #cancelCalendarEventForm")) {
+      document.querySelector("#calendarEventModal")?.remove();
+      return;
+    }
+
+    if (event.target.closest("#newCalendarEventButton")) {
+      openCalendarEventForm();
+      return;
+    }
+
+    const editCalendarEvent = event.target.closest(".edit-calendar-event");
+    if (editCalendarEvent) {
+      const record = calendarPersonalEventsCache.find((item) => item.id === editCalendarEvent.dataset.id);
+      if (record) openCalendarEventForm(record);
+      return;
+    }
+
+    const deleteCalendarEvent = event.target.closest(".delete-calendar-event");
+    if (deleteCalendarEvent) {
+      const record = calendarPersonalEventsCache.find((item) => item.id === deleteCalendarEvent.dataset.id);
+      if (record && confirm(`Delete ${record.title || "this schedule"}?`)) {
+        deleteDoc(doc(db, "calendarEvents", record.id))
+          .then(() => createAuditLog("delete", "Calendar", record.id, record, null))
+          .then(loadCalendarModalData)
+          .then(async () => {
+            dashboardCalendarItemsCache = await getUserCalendarItems(currentUserProfile);
+            renderCalendar(calendarViewMonth, calendarViewYear, getCalendarDisplayItems());
+            showDashboardMessage("Schedule deleted.");
+          })
+          .catch((error) => showDashboardMessage(`Delete failed: ${error.message}`, true));
+      }
+      return;
+    }
+
     if (event.target.closest("#calendarPrevMonth")) {
       const next = new Date(calendarViewYear, calendarViewMonth - 1, 1);
-      renderCalendar(next.getMonth(), next.getFullYear(), dashboardCalendarItemsCache);
+      renderCalendar(next.getMonth(), next.getFullYear(), getCalendarDisplayItems());
       return;
     }
 
     if (event.target.closest("#calendarNextMonth")) {
       const next = new Date(calendarViewYear, calendarViewMonth + 1, 1);
-      renderCalendar(next.getMonth(), next.getFullYear(), dashboardCalendarItemsCache);
+      renderCalendar(next.getMonth(), next.getFullYear(), getCalendarDisplayItems());
       return;
     }
 
     if (event.target.closest("#calendarToday")) {
       const today = new Date();
       selectedCalendarDate = todayIso();
-      renderCalendar(today.getMonth(), today.getFullYear(), dashboardCalendarItemsCache);
+      renderCalendar(today.getMonth(), today.getFullYear(), getCalendarDisplayItems());
       return;
     }
 
     const calendarCell = event.target.closest(".calendar-cell[data-date]");
     if (calendarCell) {
       selectedCalendarDate = calendarCell.dataset.date;
-      renderCalendar(calendarViewMonth, calendarViewYear, dashboardCalendarItemsCache);
+      renderCalendar(calendarViewMonth, calendarViewYear, getCalendarDisplayItems());
     }
   });
 
@@ -12007,7 +12439,18 @@ function bindEvents() {
     if (event.target.id === "calendarMonthSelect" || event.target.id === "calendarYearSelect") {
       const month = Number(document.querySelector("#calendarMonthSelect").value);
       const year = Number(document.querySelector("#calendarYearSelect").value);
-      renderCalendar(month, year, dashboardCalendarItemsCache);
+      renderCalendar(month, year, getCalendarDisplayItems());
+    }
+    if (event.target.id === "calendarOwnerSelect") {
+      selectedCalendarOwnerUid = event.target.value || auth.currentUser.uid;
+      loadSelectedCalendarData().then(() => renderCalendar(calendarViewMonth, calendarViewYear, getCalendarDisplayItems()));
+    }
+    if (["calendarViewMode", "calendarCategoryFilter", "calendarAttendanceFilter", "calendarSearch"].includes(event.target.id)) {
+      calendarViewMode = document.querySelector("#calendarViewMode")?.value || "month";
+      calendarCategoryFilter = document.querySelector("#calendarCategoryFilter")?.value || "";
+      calendarAttendanceFilter = document.querySelector("#calendarAttendanceFilter")?.value || "";
+      calendarSearchTerm = document.querySelector("#calendarSearch")?.value || "";
+      renderCalendar(calendarViewMonth, calendarViewYear, getCalendarDisplayItems());
     }
     if (["classSearch", "classSchoolYearFilter", "classGradeFilter"].includes(event.target.id)) {
       applyClassFilters();
@@ -12198,6 +12641,10 @@ function bindEvents() {
 
     if (event.target.id === "teacherAttendanceForm") {
       handleTeacherAttendanceFormSubmit(event);
+    }
+
+    if (event.target.id === "calendarEventForm") {
+      handleCalendarEventFormSubmit(event);
     }
 
     if (event.target.id === "teachingLoadForm") {
