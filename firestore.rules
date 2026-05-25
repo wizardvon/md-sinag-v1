@@ -1877,9 +1877,29 @@ service cloud.firestore {
     function validAssessmentWrite() {
       return request.resource.data.schoolYear is string
         && validAssessmentTerm(request.resource.data.term)
+        && request.resource.data.gradeLevel is string
         && request.resource.data.sectionId is string
+        && request.resource.data.sectionName is string
+        && request.resource.data.subjectId is string
+        && request.resource.data.subjectName is string
+        && request.resource.data.subjectName.size() > 0
+        && request.resource.data.teacherUid is string
+        && request.resource.data.teacherUid.size() > 0
+        && request.resource.data.teacherName is string
+        && request.resource.data.teacherName.size() > 0
+        && request.resource.data.assessmentType in ["Diagnostic Test", "Quarterly Exam", "Long Test", "Post Test", "Other"]
+        && request.resource.data.assessmentTitle is string
+        && request.resource.data.dateAdministered is string
+        && request.resource.data.totalItems is number
+        && request.resource.data.numberOfLearners is number
+        && request.resource.data.highestScore is number
+        && request.resource.data.lowestScore is number
+        && request.resource.data.meanScore is number
+        && request.resource.data.mps is number
+        && request.resource.data.proficiencyLevel is string
+        && request.resource.data.remarks is string
         && request.resource.data.studentId is string
-        && request.resource.data.adviserId == request.auth.uid
+        && request.resource.data.adviserId is string
         && request.resource.data.preTestScore is number
         && request.resource.data.postTestScore is number
         && request.resource.data.preHighestPossibleScore is number
@@ -1901,7 +1921,27 @@ service cloud.firestore {
         && request.resource.data.postTestPercentage is number
         && request.resource.data.improvement is number
         && request.resource.data.improvementPercentage is number
-        && request.resource.data.encodedBy == request.auth.uid;
+        && request.resource.data.encodedBy == request.auth.uid
+        && request.resource.data.createdBy is string
+        && request.resource.data.createdByName is string;
+    }
+
+    function canWriteAssessmentRecord() {
+      return signedIn()
+        && userDoc(request.auth.uid).data.status == "approved"
+        && (
+          isApprovedPrincipal()
+          || currentRole() in ["Master Teacher", "Head Teacher", "Registrar"]
+          || request.resource.data.teacherUid == request.auth.uid
+          || request.resource.data.adviserId == request.auth.uid
+        );
+    }
+
+    function canReadAssessmentRecord() {
+      return canReadAcademicRecord()
+        || ("teacherUid" in resource.data && resource.data.teacherUid == request.auth.uid)
+        || ("encodedBy" in resource.data && resource.data.encodedBy == request.auth.uid)
+        || ("createdBy" in resource.data && resource.data.createdBy == request.auth.uid);
     }
 
     function validTaskVisibilitySettings() {
@@ -2149,13 +2189,13 @@ service cloud.firestore {
     }
 
     match /assessments/{recordId} {
-      allow create: if validAssessmentWrite();
-      allow read: if canReadAcademicRecord();
-      allow update: if (isAssignedAdviserByResource() || isAssignedClassAdviserByResource())
+      allow create: if canWriteAssessmentRecord() && validAssessmentWrite();
+      allow read: if canReadAssessmentRecord();
+      allow update: if canWriteAssessmentRecord()
         && validAssessmentWrite()
         && (
           request.resource.data.adviserId == resource.data.adviserId
-          || request.resource.data.adviserId == request.auth.uid
+          || request.resource.data.teacherUid == resource.data.teacherUid
         );
       allow delete: if isApprovedPrincipal();
     }

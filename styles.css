@@ -764,6 +764,57 @@ button.is-busy:disabled {
   color: var(--navy-950);
 }
 
+.analytics-wide-grid {
+  align-items: stretch;
+}
+
+.analytics-chart-card {
+  min-width: 0;
+}
+
+.analytics-vertical-chart {
+  min-height: 220px;
+}
+
+.insight-panel ul,
+.urgent-list {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+}
+
+.insight-panel li {
+  margin: 0;
+  padding: 10px 12px;
+  color: var(--navy-900);
+  background: var(--gray-50);
+  border: 1px solid var(--gray-200);
+  border-radius: calc(var(--radius) - 4px);
+  font-size: 0.86rem;
+  font-weight: 700;
+  line-height: 1.35;
+  list-style: none;
+}
+
+.urgent-list > div {
+  display: grid;
+  gap: 5px;
+  padding: 10px 12px;
+  background: var(--gray-50);
+  border: 1px solid var(--gray-200);
+  border-radius: calc(var(--radius) - 4px);
+}
+
+.urgent-list strong {
+  color: var(--navy-950);
+}
+
+#dashboardAnalytics > .attendance-kpi-grid,
+#dashboardAnalytics > .insight-panel {
+  grid-column: 1 / -1;
+}
+
 .dashboard-module-card {
   cursor: pointer;
   transition: border-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;

@@ -204,6 +204,7 @@ let filteredDownloadableReportRows = [];
 let activeDownloadableReportId = "";
 let assessmentRecordsCache = [];
 let filteredAssessmentRecords = [];
+let filteredAssessmentGroups = [];
 let academicTeachersCache = [];
 let editingClassId = null;
 let editingClassReturnModule = "Classes / Sections";
@@ -3630,6 +3631,15 @@ function canEditSectionRecords(sectionId) {
   return Boolean(sectionId && auth?.currentUser?.uid && classRecordsCache.some((record) => record.id === sectionId && record.adviserId === auth.currentUser.uid));
 }
 
+function canEditAssessmentRecord(record = {}) {
+  if (!auth?.currentUser?.uid) return false;
+  if (canViewAllAcademic()) return true;
+  return record.teacherUid === auth.currentUser.uid
+    || record.encodedBy === auth.currentUser.uid
+    || record.createdBy === auth.currentUser.uid
+    || canEditSectionRecords(record.sectionId);
+}
+
 async function getVisibleSectionScopedRecords(collectionName) {
   if (currentUserProfile?.role !== "Teacher") {
     const snapshot = await getDocs(collection(db, collectionName));
@@ -3661,7 +3671,46 @@ async function getVisibleStudentAttendance() {
 }
 
 async function getVisibleAssessments() {
-  return getVisibleSectionScopedRecords("assessments");
+  if (currentUserProfile?.role !== "Teacher") {
+    const snapshot = await getDocs(collection(db, "assessments"));
+    return snapshot.docs.map(normalizeRecord);
+  }
+  const [ownRecords, adviserRecords] = await Promise.all([
+    getDocs(query(collection(db, "assessments"), where("teacherUid", "==", auth.currentUser.uid))),
+    getVisibleSectionScopedRecords("assessments").then((records) => ({ docs: records.map((record) => ({ id: record.id, data: () => record })) })),
+  ]);
+  const mapped = [
+    ...ownRecords.docs.map(normalizeRecord),
+    ...adviserRecords.docs.map(normalizeRecord),
+  ];
+  return [...new Map(mapped.map((record) => [record.id, record])).values()];
+}
+
+async function getAssessmentVisibleClasses() {
+  if (currentUserProfile?.role !== "Teacher") return getVisibleClasses();
+  const [adviserClasses, workloads] = await Promise.all([
+    getVisibleClasses(),
+    getVisibleTeacherWorkloadRecords(),
+  ]);
+  const workloadClasses = workloads
+    .filter((record) => record.teacherId === auth.currentUser.uid && record.sectionId)
+    .map((record) => ({
+      id: record.sectionId,
+      gradeLevel: record.gradeLevel || "",
+      sectionName: record.sectionName || "Assigned section",
+      schoolYear: record.schoolYear || "",
+      adviserId: "",
+      adviserName: "",
+      status: "active",
+    }));
+  return [...new Map([...adviserClasses, ...workloadClasses].map((record) => [record.id, record])).values()];
+}
+
+async function getAssessmentVisibleStudents(classes = classRecordsCache) {
+  if (currentUserProfile?.role !== "Teacher") return getVisibleStudents();
+  const sectionIds = new Set(classes.map((record) => record.id));
+  const snapshot = await getDocs(collection(db, "students"));
+  return snapshot.docs.map(normalizeRecord).filter((record) => sectionIds.has(record.sectionId));
 }
 
 async function getVisibleTeacherAttendance() {
@@ -5246,7 +5295,7 @@ async function refreshDashboardAnalytics(role) {
 
   try {
     const visibility = await getTaskVisibilitySettings();
-    const [reports, learners, observations, documents, financialReports, ppas, lessonPlans, workloads, classes, students, assessments] = await Promise.all([
+    const [reports, learners, observations, documents, financialReports, ppas, lessonPlans, workloads, classes, students, assessments, attendanceRecords] = await Promise.all([
       (role === "Principal" || complianceRoles.includes(role)) ? getVisibleReportAssignments() : Promise.resolve([]),
       learnerMonitorRoles.includes(role) ? getVisibleLearnerRecords() : Promise.resolve([]),
       observationRoles.includes(role) ? getVisibleClassroomObservations() : Promise.resolve([]),
@@ -5258,7 +5307,9 @@ async function refreshDashboardAnalytics(role) {
       canViewAcademicModule(role) ? getVisibleClasses() : Promise.resolve([]),
       canViewAcademicModule(role) ? getVisibleStudents() : Promise.resolve([]),
       canViewAcademicModule(role) ? getVisibleAssessments() : Promise.resolve([]),
+      canViewAcademicModule(role) ? getVisibleStudentAttendance() : Promise.resolve([]),
     ]);
+    studentAttendanceRecordsCache = attendanceRecords;
 
     const canUseEnrollment = canViewEnrollmentModule(role);
     if (canUseEnrollment) {
@@ -5282,9 +5333,41 @@ async function refreshDashboardAnalytics(role) {
     );
     const diagnosticCompletion = countAssessmentCompletion(scopedAssessments, classes, students, "pre", visibility);
     const examCompletion = countAssessmentCompletion(scopedAssessments, classes, students, "post", visibility);
+    const reportGroups = buildComplianceGroups(reports);
+    const today = todayIso();
+    const attendanceToday = studentAttendanceRecordsCache?.filter?.((record) => attendanceDateValue(record) === today) || [];
+    const attendanceTodayRate = attendanceToday.length ? attendanceRate(attendanceToday).toFixed(1) : "0.0";
+    const pendingSubmissions = reportGroups.filter((group) => ["Pending", "In Progress"].includes(group.status)).length;
+    const overdueReports = reportGroups.filter((group) => group.status === "Overdue").length;
+    const activeLearners = learners.filter((record) => !["Resolved", "Closed"].includes(record.status));
+    const interventionAlerts = learners.filter((record) => ["Not Started", "Ongoing", "Unresolved"].includes(record.interventionStatus)).length;
+    const financialSpent = financialReports.reduce((sum, record) => sum + toSafeNumber(record.amountSpent), 0);
+    const financialAllocated = financialReports.reduce((sum, record) => sum + toSafeNumber(record.amountAllocated), 0);
+    const utilization = financialAllocated ? ((financialSpent / financialAllocated) * 100).toFixed(1) : "0.0";
+    const upcomingDeadlines = reports.filter((record) => record.dueDate && record.dueDate >= today).sort((a, b) => a.dueDate.localeCompare(b.dueDate)).slice(0, 5);
+    const dashboardInsights = [
+      overdueReports ? `${overdueReports} report assignment${overdueReports === 1 ? "" : "s"} are overdue.` : "",
+      activeLearners.length ? `${activeLearners.length} learner monitoring case${activeLearners.length === 1 ? "" : "s"} remain active.` : "",
+      interventionAlerts ? `${interventionAlerts} intervention record${interventionAlerts === 1 ? "" : "s"} are unresolved or ongoing.` : "",
+      Number(utilization) >= 80 ? `Budget utilization is ${utilization}%.` : "",
+      upcomingDeadlines[0] ? `${upcomingDeadlines[0].title || "A report"} is the next report deadline.` : "",
+    ];
 
     const charts = [
+      renderAttendanceKpiGrid([
+        ["Attendance Today", `${attendanceTodayRate}%`, `${attendanceToday.length} records today`],
+        ["Pending Submissions", String(pendingSubmissions), "Grouped report assignments"],
+        ["Overdue Reports", String(overdueReports), "Past due and incomplete"],
+        ["At-Risk Learners", String(activeLearners.length), "Active monitoring cases"],
+        ["Intervention Alerts", String(interventionAlerts), "Unresolved or ongoing"],
+        ["Enrollment Summary", String(enrollmentRecordsCache.length), "Current enrollment records"],
+        ["Workload Summary", String(workloads.length), "Teaching load records"],
+        ["Financial Summary", `${utilization}%`, "Budget utilization"],
+      ]),
+      renderInsightPanel("Governance Alerts", dashboardInsights),
       reports.length ? renderMiniChart("Report Status Distribution", reports, reportAssignmentStatuses, "status") : "",
+      reportGroups.length ? renderSummaryChart("Compliance Status", groupCountRows(reportGroups, "status")) : "",
+      upcomingDeadlines.length ? renderSummaryChart("Upcoming Deadlines", upcomingDeadlines.map((record) => [record.title || record.reportType || "Report", 1])) : "",
       canViewLessonPlanModule(role) ? renderSummaryChart("Lesson Plan Completion", [
         ["Submitted", lessonPlanSubmitted],
         ["Pending", Math.max(lessonPlanExpected - lessonPlanSubmitted, 0)],
@@ -5577,6 +5660,25 @@ function renderStudentAttendanceAnalytics() {
   const absent = records.filter((record) => record.status === "Absent").length;
   const late = records.filter((record) => record.status === "Late").length;
   const excused = records.filter((record) => record.status === "Excused").length;
+  const studentAttendanceGroups = groupCountRows(records, (record) => record.studentId || record.studentName).map(([key]) => {
+    const studentRecords = records.filter((record) => (record.studentId || record.studentName) === key);
+    return {
+      key,
+      name: studentRecords[0]?.studentName || key,
+      absent: studentRecords.filter((record) => record.status === "Absent").length,
+      late: studentRecords.filter((record) => record.status === "Late").length,
+      total: studentRecords.length,
+    };
+  });
+  const chronicAbsenteeism = studentAttendanceGroups.filter((item) => item.absent >= 3).length;
+  const perfectAttendance = studentAttendanceGroups.filter((item) => item.total > 0 && item.absent === 0 && item.late === 0).length;
+  const monthlyRows = groupCountRows(records.filter((record) => ["Present", "Late"].includes(record.status)), (record) => analyticsMonthKey(attendanceDateValue(record)), "No month")
+    .filter(([label]) => label !== "No month")
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .slice(-6);
+  const sectionAbsenceRows = groupCountRows(records.filter((record) => record.status === "Absent"), (record) => record.sectionName || record.sectionId).slice(0, 8);
+  const heatmapRows = groupCountRows(records.filter((record) => record.status === "Absent"), attendanceDateValue).slice(0, 10);
+  const trend = compareLatestTwo(monthlyRows);
   const sectionRows = classRecordsCache
     .map((section) => {
       const sectionRecords = records.filter((record) => record.sectionId === section.id);
@@ -5602,18 +5704,30 @@ function renderStudentAttendanceAnalytics() {
         `${dateRecords.length} records`,
       ];
     });
+  const insights = [
+    sectionAbsenceRows[0] ? `${sectionAbsenceRows[0][0]} has the highest absenteeism in the current view.` : "",
+    trend.change < 0 ? "Attendance dropped compared to the previous month." : trend.change > 0 ? "Attendance improved compared to the previous month." : "",
+    chronicAbsenteeism ? `${chronicAbsenteeism} learner${chronicAbsenteeism === 1 ? "" : "s"} show chronic absenteeism.` : "",
+    late ? `${late} late mark${late === 1 ? "" : "s"} need follow-up.` : "",
+  ];
 
   host.innerHTML = `
     ${renderAttendanceKpiGrid([
       ["Attendance Rate", `${attendanceRate(records).toFixed(1)}%`, `${present} present or late of ${records.length}`],
-      ["Absences", String(absent), `${late} late, ${excused} excused`],
+      ["Total Absences", String(absent), `${excused} excused records`],
+      ["Total Late", String(late), "Late attendance marks"],
+      ["Chronic Absenteeism", String(chronicAbsenteeism), "3 or more absences"],
+      ["Perfect Attendance", String(perfectAttendance), "No absence or late marks"],
       ["Students Tracked", String(attendanceUniqueCount(records, (record) => record.studentId || record.studentName)), "Within current filters"],
-      ["Attendance Dates", String(attendanceUniqueCount(records, attendanceDateValue)), "Recorded class days"],
     ])}
     <div class="chart-grid attendance-chart-grid">
       ${renderSummaryChart("Status Distribution", attendanceStatuses.map((item) => [item, records.filter((record) => record.status === item).length]))}
+      ${renderVerticalBarChart("Monthly Attendance Trend", monthlyRows)}
+      ${renderSummaryChart("Attendance by Section", sectionAbsenceRows)}
       ${renderRateRows("Lowest Section Rates", sectionRows)}
       ${renderRateRows("Recent Daily Rates", dailyRows)}
+      ${renderSummaryChart("Absent-Heavy Days", heatmapRows)}
+      ${renderInsightPanel("Attendance Alerts", insights)}
     </div>
   `;
 }
@@ -5907,6 +6021,30 @@ function renderTeacherAttendanceAnalytics() {
   const presentStatuses = ["Present"];
   const present = records.filter((record) => presentStatuses.includes(record.status)).length;
   const absent = records.filter((record) => record.status === "Absent").length;
+  const late = records.filter((record) => record.status === "Late").length;
+  const teacherAttendanceGroups = groupCountRows(records, (record) => record.teacherId || record.teacherName).map(([key]) => {
+    const teacherRecords = records.filter((record) => (record.teacherId || record.teacherName) === key);
+    return {
+      key,
+      name: teacherRecords[0]?.teacherName || key,
+      absent: teacherRecords.filter((record) => record.status === "Absent").length,
+      late: teacherRecords.filter((record) => record.status === "Late").length,
+      total: teacherRecords.length,
+    };
+  });
+  const chronicAbsenteeism = teacherAttendanceGroups.filter((item) => item.absent >= 3).length;
+  const perfectAttendance = teacherAttendanceGroups.filter((item) => item.total > 0 && item.absent === 0 && item.late === 0).length;
+  const monthlyRows = groupCountRows(records.filter((record) => record.status === "Present"), (record) => analyticsMonthKey(attendanceDateValue(record)), "No month")
+    .filter(([label]) => label !== "No month")
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .slice(-6);
+  const absenceRows = teacherAttendanceGroups
+    .filter((item) => item.absent > 0)
+    .sort((a, b) => b.absent - a.absent || a.name.localeCompare(b.name))
+    .slice(0, 8)
+    .map((item) => [item.name, item.absent]);
+  const heatmapRows = groupCountRows(records.filter((record) => record.status === "Absent"), attendanceDateValue).slice(0, 10);
+  const trend = compareLatestTwo(monthlyRows);
   const teacherRows = [...new Set(records.map((record) => record.teacherId || record.teacherName).filter(Boolean))]
     .map((teacherKey) => {
       const teacherRecords = records.filter((record) => (record.teacherId || record.teacherName) === teacherKey);
@@ -5931,18 +6069,29 @@ function renderTeacherAttendanceAnalytics() {
         `${dateRecords.length} records`,
       ];
     });
+  const insights = [
+    absenceRows[0] ? `${absenceRows[0][0]} has the highest personnel absence count.` : "",
+    trend.change < 0 ? "Teacher attendance dropped compared to the previous month." : trend.change > 0 ? "Teacher attendance improved compared to the previous month." : "",
+    chronicAbsenteeism ? `${chronicAbsenteeism} personnel have repeated absences.` : "",
+  ];
 
   host.innerHTML = `
     ${renderAttendanceKpiGrid([
       ["Attendance Rate", `${attendanceRate(records, presentStatuses).toFixed(1)}%`, `${present} present of ${records.length}`],
-      ["Absences", String(absent), "Marked absent"],
+      ["Total Absences", String(absent), "Marked absent"],
+      ["Total Late", String(late), "Late marks"],
+      ["Chronic Absenteeism", String(chronicAbsenteeism), "3 or more absences"],
+      ["Perfect Attendance", String(perfectAttendance), "No absence or late marks"],
       ["Teachers Tracked", String(attendanceUniqueCount(records, (record) => record.teacherId || record.teacherName)), "Within current filters"],
-      ["Attendance Dates", String(attendanceUniqueCount(records, attendanceDateValue)), "Recorded personnel days"],
     ])}
     <div class="chart-grid attendance-chart-grid">
       ${renderSummaryChart("Status Distribution", teacherAttendanceStatuses.map((item) => [item, records.filter((record) => record.status === item).length]))}
+      ${renderVerticalBarChart("Monthly Attendance Trend", monthlyRows)}
+      ${renderSummaryChart("Teacher Attendance Comparison", absenceRows)}
       ${renderRateRows("Lowest Teacher Rates", teacherRows)}
       ${renderRateRows("Recent Daily Rates", dateRows)}
+      ${renderSummaryChart("Absent-Heavy Days", heatmapRows)}
+      ${renderInsightPanel("Teacher Attendance Alerts", insights)}
     </div>
   `;
 }
@@ -6106,11 +6255,12 @@ async function renderTeacherWorkloadModule() {
   `;
   try {
     await loadTeacherWorkloadTeachers();
-    [classRecordsCache, studentRecordsCache, teacherWorkloadRecordsCache, ancillaryAssignmentRecordsCache] = await Promise.all([
+    [classRecordsCache, studentRecordsCache, teacherWorkloadRecordsCache, ancillaryAssignmentRecordsCache, observationRecordsCache] = await Promise.all([
       getVisibleClasses(),
       getVisibleStudents(),
       getVisibleTeacherWorkloadRecords(),
       getVisibleAncillaryAssignments(),
+      observationRoles.includes(currentUserProfile.role) ? getVisibleClassroomObservations() : Promise.resolve([]),
     ]);
     teacherWorkloadSummariesCache = buildTeacherWorkloadSummaries();
     populateTeacherWorkloadFilters();
@@ -6178,19 +6328,30 @@ function renderTeacherWorkloadAnalytics() {
     : 0;
   const mostOverloaded = summaries[0]?.teacherName || "None";
   const ancillaryCount = summaries.reduce((sum, summary) => sum + summary.duties.length, 0);
+  const totalTeachingLoad = summaries.reduce((sum, summary) => sum + summary.teachingHours, 0);
+  const departmentRows = groupSumRows(summaries, (summary) => summary.department || summary.role || "Unassigned", (summary) => summary.workloadScore).slice(0, 8);
+  const ancillaryRows = groupCountRows(summaries.flatMap((summary) => summary.duties), "dutyName").slice(0, 8);
+  const overloadedTeacher = summaries.find((summary) => summary.workloadScore > average && ["Heavy Load", "Overloaded"].includes(summary.workloadStatus));
 
   host.innerHTML = `
     ${renderAttendanceKpiGrid([
       ["Total Teachers", String(summaries.length), "Within current filters"],
-      ["Heavy/Overloaded", String(summaries.filter((summary) => ["Heavy Load", "Overloaded"].includes(summary.workloadStatus)).length), "Needs balancing review"],
-      ["Light Load", String(light.length), "May receive more assignments"],
-      ["Average Score", average.toFixed(1), `Most loaded: ${mostOverloaded}`],
-      ["Ancillary Duties", String(ancillaryCount), "Coordinator and adviser duties"],
+      ["Total Teaching Load", `${totalTeachingLoad.toFixed(1)} hrs`, "Weekly class load"],
+      ["Average Load", average.toFixed(1), "Average workload score"],
+      ["Most Loaded Teacher", mostOverloaded, "Highest workload score"],
+      ["Ancillary Assignments", String(ancillaryCount), "Coordinator and adviser duties"],
+      ["Observation Count", String(observationRecordsCache.length || 0), "Visible observation records"],
     ])}
     <div class="chart-grid attendance-chart-grid">
       ${renderSummaryChart("Workload Status", WORKLOAD_RULES.statusThresholds.map((item) => [item.label, summaries.filter((summary) => summary.workloadStatus === item.label).length]))}
-      ${renderSummaryChart("Highest Workload Scores", summaries.slice(0, 6).map((summary) => [summary.teacherName, Math.round(summary.workloadScore)]))}
-      ${renderSummaryChart("Ancillary Duty Count", summaries.slice(0, 6).map((summary) => [summary.teacherName, summary.duties.length]))}
+      ${renderSummaryChart("Teacher Load Comparison", summaries.slice(0, 8).map((summary) => [summary.teacherName, Math.round(summary.workloadScore)]))}
+      ${renderAnalyticsPieChart("Department Workload Distribution", departmentRows.map(([label, value]) => [label, Math.round(value)]))}
+      ${renderSummaryChart("Ancillary Assignment Distribution", ancillaryRows)}
+      ${renderInsightPanel("Workload Insights", [
+        departmentRows[0] ? `${departmentRows[0][0]} has the highest workload concentration.` : "",
+        overloadedTeacher ? `${overloadedTeacher.teacherName} exceeds the current average workload.` : "",
+        light.length ? `${light.length} teacher${light.length === 1 ? "" : "s"} may receive additional load if needed.` : "",
+      ])}
     </div>
   `;
 }
@@ -7294,28 +7455,42 @@ async function renderAssessmentModule() {
       <div><p class="eyebrow">Assessment monitoring</p><h2>Diagnostic Test and Exam</h2></div>
       <div class="toolbar-actions"><button id="newAssessmentButton" class="primary-button" type="button">Encode Scores</button></div>
     </section>
-    <section class="card-grid compact-card-grid" id="assessmentComparisonCards">
+    <section class="attendance-analytics" id="assessmentComparisonCards">
       <p class="empty-state">Loading assessment comparison...</p>
     </section>
     <section class="table-card">
       <div class="section-header"><h2>Assessment Records</h2></div>
       <div class="filter-grid">
-        <label>Search<input id="assessmentSearch" type="search" placeholder="Student or section" /></label>
+        <label>Search<input id="assessmentSearch" type="search" placeholder="Section, subject, teacher, title" /></label>
         <label>School Year<select id="assessmentSchoolYearFilter"></select></label>
         <label>Term<select id="assessmentTermFilter"></select></label>
+        <label>Grade Level<select id="assessmentGradeFilter"></select></label>
         <label>Section<select id="assessmentSectionFilter"></select></label>
+        <label>Subject<select id="assessmentSubjectFilter"></select></label>
+        <label>Subject Teacher<select id="assessmentTeacherFilter"></select></label>
+        <label>Assessment Type<select id="assessmentTypeFilter"></select></label>
+        <label>MPS Range<select id="assessmentMpsFilter"><option value="">All MPS ranges</option><option value="low">Below 75%</option><option value="mid">75% to 84%</option><option value="high">85% and above</option></select></label>
       </div>
       <div id="assessmentTableHost" class="table-wrap"><p class="empty-state">Loading assessments...</p></div>
     </section>
   `;
   try {
     await getTaskVisibilitySettings();
-    classRecordsCache = await getVisibleClasses();
-    studentRecordsCache = await getVisibleStudents();
+    await loadTeacherWorkloadTeachers();
+    [teacherWorkloadRecordsCache, schoolSubjectRecordsCache] = await Promise.all([
+      getVisibleTeacherWorkloadRecords(),
+      getVisibleSchoolSubjects(),
+    ]);
+    classRecordsCache = await getAssessmentVisibleClasses();
+    studentRecordsCache = await getAssessmentVisibleStudents(classRecordsCache);
     assessmentRecordsCache = await getVisibleAssessments();
     document.querySelector("#assessmentSchoolYearFilter").innerHTML = optionList(uniqueOptions(assessmentRecordsCache, "schoolYear"), "", "All years");
     document.querySelector("#assessmentTermFilter").innerHTML = optionList([...new Set(assessmentScopeOptions.filter((item) => activeAssessmentScopes().includes(item.key)).map((item) => item.term))], "", "All visible terms");
+    document.querySelector("#assessmentGradeFilter").innerHTML = optionList(uniqueOptions([...assessmentRecordsCache, ...classRecordsCache], "gradeLevel"), "", "All grade levels");
     document.querySelector("#assessmentSectionFilter").innerHTML = activeClassOptions("", "All sections");
+    document.querySelector("#assessmentSubjectFilter").innerHTML = optionList([...new Set(assessmentRecordsCache.map(assessmentSubjectName))].sort(), "", "All subjects");
+    document.querySelector("#assessmentTeacherFilter").innerHTML = optionList([...new Set(assessmentRecordsCache.map(assessmentTeacherName))].sort(), "", "All teachers");
+    document.querySelector("#assessmentTypeFilter").innerHTML = optionList(assessmentTypeOptions(), "", "All assessment types");
     applyAssessmentFilters();
   } catch (error) {
     document.querySelector("#assessmentTableHost").innerHTML = `<p class="empty-state">Unable to load assessments: ${escapeHtml(error.message)}</p>`;
@@ -7325,32 +7500,148 @@ async function renderAssessmentModule() {
 function applyAssessmentFilters() {
   const host = document.querySelector("#assessmentTableHost");
   if (!host) return;
+  const search = (document.querySelector("#assessmentSearch")?.value || "").trim().toLowerCase();
+  const schoolYear = document.querySelector("#assessmentSchoolYearFilter")?.value || "";
+  const term = document.querySelector("#assessmentTermFilter")?.value || "";
+  const gradeLevel = document.querySelector("#assessmentGradeFilter")?.value || "";
+  const sectionId = document.querySelector("#assessmentSectionFilter")?.value || "";
+  const subjectName = document.querySelector("#assessmentSubjectFilter")?.value || "";
+  const teacherName = document.querySelector("#assessmentTeacherFilter")?.value || "";
+  const assessmentType = document.querySelector("#assessmentTypeFilter")?.value || "";
+  const mpsRange = document.querySelector("#assessmentMpsFilter")?.value || "";
   filteredAssessmentRecords = assessmentRecordsCache.filter((record) =>
     (assessmentScopeMatches(record, "pre") || assessmentScopeMatches(record, "post"))
-    && academicFilterMatch(record, document.querySelector("#assessmentSearch")?.value || "", {
-    schoolYear: document.querySelector("#assessmentSchoolYearFilter")?.value || "",
-    term: document.querySelector("#assessmentTermFilter")?.value || "",
-    sectionId: document.querySelector("#assessmentSectionFilter")?.value || "",
-  }));
+    && (!schoolYear || record.schoolYear === schoolYear)
+    && (!term || record.term === term)
+    && (!gradeLevel || record.gradeLevel === gradeLevel)
+    && (!sectionId || record.sectionId === sectionId)
+    && (!subjectName || assessmentSubjectName(record) === subjectName)
+    && (!teacherName || assessmentTeacherName(record) === teacherName)
+    && (!assessmentType || assessmentDisplayType(record) === assessmentType)
+    && (!search || [
+      record.sectionName,
+      record.gradeLevel,
+      assessmentSubjectName(record),
+      assessmentTeacherName(record),
+      assessmentDisplayType(record),
+      record.assessmentTitle,
+      record.studentName,
+    ].filter(Boolean).join(" ").toLowerCase().includes(search))
+  );
+  filteredAssessmentGroups = buildAssessmentGroups(filteredAssessmentRecords)
+    .filter((group) =>
+      !mpsRange
+      || (mpsRange === "low" && group.mps < 75)
+      || (mpsRange === "mid" && group.mps >= 75 && group.mps < 85)
+      || (mpsRange === "high" && group.mps >= 85)
+    );
+  filteredAssessmentRecords = filteredAssessmentGroups.flatMap((group) => group.records);
   renderAssessmentComparisonCards(filteredAssessmentRecords);
-  if (!filteredAssessmentRecords.length) {
+  if (!filteredAssessmentGroups.length) {
     host.innerHTML = `<p class="empty-state">No assessment records match the current filters.</p>`;
     return;
   }
   host.innerHTML = `
     <table class="academic-table">
-      <thead><tr><th>Student</th><th>Section</th><th>Diagnostic Test</th><th>Term Exam</th><th>Improvement</th><th>Actions</th></tr></thead>
-      <tbody>${filteredAssessmentRecords.map((record) => `
+      <thead><tr><th>School Year</th><th>Quarter / Term</th><th>Grade Level</th><th>Section</th><th>Subject</th><th>Subject Teacher</th><th>Assessment Type</th><th>Assessment Title</th><th>MPS</th><th>Date Administered</th><th>Actions</th></tr></thead>
+      <tbody>${filteredAssessmentGroups.map((group) => `
         <tr>
-          <td><strong>${escapeHtml(record.studentName || "")}</strong></td>
-          <td>${escapeHtml(record.sectionName || "")}<small class="row-note">${escapeHtml(record.schoolYear || "")} ${escapeHtml(record.term || "")}</small></td>
-          <td>${Number(record.preTestScore || 0)} / ${getAssessmentHighScore(record, "pre")}<small class="row-note">${Number(record.preTestPercentage ?? calculateAssessmentValues(record.preTestScore, record.postTestScore, getAssessmentHighScore(record, "pre"), getAssessmentHighScore(record, "post")).preTestPercentage).toFixed(1)}%</small></td>
-          <td>${Number(record.postTestScore || 0)} / ${getAssessmentHighScore(record, "post")}<small class="row-note">${Number(record.postTestPercentage ?? calculateAssessmentValues(record.preTestScore, record.postTestScore, getAssessmentHighScore(record, "pre"), getAssessmentHighScore(record, "post")).postTestPercentage).toFixed(1)}%</small></td>
-          <td>${escapeHtml(formatAssessmentComparison(record))}</td>
-          <td class="row-actions">${canEditSectionRecords(record.sectionId) ? `<button class="secondary-button edit-assessment" type="button" data-id="${escapeHtml(record.id)}">Edit</button>` : ""}</td>
+          <td>${escapeHtml(group.schoolYear || "Not recorded")}</td>
+          <td>${escapeHtml(group.term || "Not recorded")}</td>
+          <td>${escapeHtml(group.gradeLevel || "Not recorded")}</td>
+          <td>${escapeHtml(group.sectionName || "No section")}</td>
+          <td><strong>${escapeHtml(group.subjectName)}</strong><small class="row-note">${escapeHtml(group.subjectCategory || "No category")}</small></td>
+          <td>${escapeHtml(group.teacherName)}</td>
+          <td>${escapeHtml(group.assessmentType)}</td>
+          <td>${escapeHtml(group.assessmentTitle || "Untitled assessment")}<small class="row-note">${group.isLegacy ? "Legacy section-based record" : `${group.numberOfLearners} learners`}</small></td>
+          <td><strong>${group.mps.toFixed(1)}%</strong><small class="row-note">${escapeHtml(group.proficiencyLevel)}</small></td>
+          <td>${escapeHtml(group.dateAdministered || "Not recorded")}</td>
+          <td class="row-actions">${canEditAssessmentRecord(group.records[0]) ? `<button class="secondary-button edit-assessment" type="button" data-id="${escapeHtml(group.records[0].id)}">Edit</button>` : ""}</td>
         </tr>`).join("")}</tbody>
     </table>
   `;
+}
+
+function assessmentTypeOptions() {
+  return ["Diagnostic Test", "Quarterly Exam", "Long Test", "Post Test", "Other"];
+}
+
+function assessmentSubjectName(record = {}) {
+  return record.subjectName || "Unspecified Subject";
+}
+
+function assessmentTeacherName(record = {}) {
+  return record.teacherName || record.adviserName || record.encodedByName || record.createdByName || "Unspecified Teacher";
+}
+
+function assessmentDisplayType(record = {}) {
+  if (record.assessmentType) return record.assessmentType;
+  if (getAssessmentHighScore(record, "post") > 0) return "Quarterly Exam";
+  return "Diagnostic Test";
+}
+
+function assessmentProficiencyLevel(mps) {
+  if (mps >= 90) return "Outstanding";
+  if (mps >= 85) return "Very Satisfactory";
+  if (mps >= 80) return "Satisfactory";
+  if (mps >= 75) return "Fairly Satisfactory";
+  return "Needs Intervention";
+}
+
+function assessmentGroupKey(record = {}) {
+  if (record.assessmentBatchId) return `batch:${record.assessmentBatchId}`;
+  return [
+    record.schoolYear || "",
+    record.term || "",
+    record.gradeLevel || "",
+    record.sectionId || record.sectionName || "",
+    record.subjectId || assessmentSubjectName(record),
+    record.teacherUid || assessmentTeacherName(record),
+    assessmentDisplayType(record),
+    record.assessmentTitle || "",
+    record.dateAdministered || "",
+  ].join("|");
+}
+
+function buildAssessmentGroups(records = []) {
+  const buckets = new Map();
+  records.forEach((record) => {
+    const key = assessmentGroupKey(record);
+    if (!buckets.has(key)) buckets.set(key, []);
+    buckets.get(key).push(record);
+  });
+  return [...buckets.entries()].map(([id, groupRecords]) => {
+    const first = groupRecords[0] || {};
+    const scoreType = assessmentDisplayType(first) === "Diagnostic Test" ? "pre" : "post";
+    const scores = groupRecords
+      .map((record) => scoreType === "pre" ? Number(record.preTestScore || 0) : Number(record.postTestScore || 0))
+      .filter((value) => Number.isFinite(value));
+    const totalItems = scoreType === "pre" ? getAssessmentHighScore(first, "pre") : getAssessmentHighScore(first, "post");
+    const meanScore = scores.length ? scores.reduce((sum, score) => sum + score, 0) / scores.length : 0;
+    const mps = totalItems ? (meanScore / totalItems) * 100 : Number(first.mps || 0);
+    return {
+      id,
+      records: groupRecords,
+      schoolYear: first.schoolYear || "",
+      term: first.term || "",
+      gradeLevel: first.gradeLevel || "",
+      sectionName: first.sectionName || "",
+      subjectName: assessmentSubjectName(first),
+      subjectCategory: first.subjectCategory || first.subjectArea || "",
+      teacherName: assessmentTeacherName(first),
+      assessmentType: assessmentDisplayType(first),
+      assessmentTitle: first.assessmentTitle || "",
+      dateAdministered: first.dateAdministered || "",
+      totalItems,
+      numberOfLearners: groupRecords.length,
+      highestScore: scores.length ? Math.max(...scores) : 0,
+      lowestScore: scores.length ? Math.min(...scores) : 0,
+      meanScore,
+      mps,
+      proficiencyLevel: first.proficiencyLevel || assessmentProficiencyLevel(mps),
+      isLegacy: !first.subjectName || !first.teacherUid,
+    };
+  }).sort((a, b) => (b.dateAdministered || "").localeCompare(a.dateAdministered || "") || a.subjectName.localeCompare(b.subjectName));
 }
 
 function renderAssessmentComparisonCards(records = []) {
@@ -7358,28 +7649,62 @@ function renderAssessmentComparisonCards(records = []) {
   if (!host) return;
   const stats = computeAssessmentStats(records, [], studentRecordsCache, classRecordsCache);
   const comparedCount = countComparableAssessments(records);
-  const cardItems = [
-    ["Diagnostic MPS", `${stats.preMps.toFixed(1)}%`, "Whole class percentage score"],
-    ["Term Exam MPS", `${stats.postMps.toFixed(1)}%`, "Whole class percentage score"],
-    ["Improvement", `${stats.improvement.toFixed(1)} pp`, "Average percentage-point gain"],
-    ["Compared Learners", comparedCount, "With both test percentages"],
-  ];
-  host.innerHTML = cardItems.map(([label, value, helper]) => `
-    <article class="stat-card">
-      <span>${escapeHtml(label)}</span>
-      <strong>${escapeHtml(value)}</strong>
-      <small>${escapeHtml(helper)}</small>
-    </article>
-  `).join("");
+  const mpsByGroup = (getter) => groupCountRows(records, getter).map(([label]) => {
+    const grouped = records.filter((record) => (getter(record) || "Not recorded") === label);
+    const groupStats = computeAssessmentStats(grouped, [], [], []);
+    return [label, Number(groupStats.postMps.toFixed(1))];
+  });
+  const subjectRows = mpsByGroup((record) => record.subjectName || record.sectionName || record.gradeLevel).sort((a, b) => b[1] - a[1]).slice(0, 8);
+  const sectionRows = mpsByGroup((record) => record.sectionName || record.sectionId).sort((a, b) => b[1] - a[1]).slice(0, 8);
+  const gradeRows = mpsByGroup((record) => record.gradeLevel || "No grade").sort((a, b) => b[1] - a[1]).slice(0, 8);
+  const teacherRows = mpsByGroup((record) => assessmentTeacherName(record)).sort((a, b) => b[1] - a[1]).slice(0, 8);
+  const termRows = groupCountRows(records, "term").map(([term]) => {
+    const grouped = records.filter((record) => record.term === term);
+    return [term, Number(computeAssessmentStats(grouped, [], [], []).postMps.toFixed(1))];
+  }).sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+  const strandRows = mpsByGroup((record) => record.strand || record.sectionName || record.gradeLevel).sort((a, b) => b[1] - a[1]).slice(0, 8);
+  const highest = subjectRows[0] || ["None", 0];
+  const lowest = [...subjectRows].reverse()[0] || ["None", 0];
+  const bestStrand = strandRows[0] || ["None", 0];
+  const lowStrand = [...strandRows].reverse()[0] || ["None", 0];
+  host.innerHTML = `
+    ${renderAttendanceKpiGrid([
+      ["School-wide Average MPS", `${stats.postMps.toFixed(1)}%`, "Term exam MPS"],
+      ["Highest MPS Subject", highest[0], `${highest[1]}% MPS`],
+      ["Lowest MPS Subject", lowest[0], `${lowest[1]}% MPS`],
+      ["Best Performing Strand", bestStrand[0], `${bestStrand[1]}% MPS`],
+      ["Lowest Performing Strand", lowStrand[0], `${lowStrand[1]}% MPS`],
+    ])}
+    <div class="chart-grid attendance-chart-grid">
+      ${renderSummaryChart("MPS by Subject", subjectRows)}
+      ${renderSummaryChart("MPS by Section", sectionRows)}
+      ${renderSummaryChart("MPS by Grade Level", gradeRows)}
+      ${renderVerticalBarChart("Quarterly MPS Trend", termRows)}
+      ${renderSummaryChart("MPS by Subject Teacher", teacherRows)}
+      ${renderSummaryChart("Lowest Performing Subjects", [...subjectRows].sort((a, b) => a[1] - b[1]).slice(0, 8))}
+      ${renderSummaryChart("Subject Trend Comparison", subjectRows)}
+      ${renderInsightPanel("MPS Insights", [
+        termRows.length >= 2 && termRows.at(-1)[1] < termRows.at(-2)[1] ? `MPS decreased by ${(termRows.at(-2)[1] - termRows.at(-1)[1]).toFixed(1)}% from the previous term.` : "",
+        bestStrand[0] !== "None" ? `${bestStrand[0]} has the highest average MPS.` : "",
+        lowest[0] !== "None" ? `${lowest[0]} needs instructional follow-up.` : "",
+        comparedCount ? `${comparedCount} learners have comparable diagnostic and term exam scores.` : "",
+      ])}
+    </div>
+  `;
 }
 
 function openAssessmentForm(record = null) {
   editingAssessmentId = record?.id || null;
-  const editableClasses = classRecordsCache.filter((section) => canEditSectionRecords(section.id));
+  const editableClasses = getAssessmentEditableClasses();
   const sectionOptions = editableClasses.map((section) => `<option value="${escapeHtml(section.id)}" ${section.id === record?.sectionId ? "selected" : ""}>${escapeHtml(classLabel(section))}</option>`).join("");
+  const selectedScoreType = record ? (getAssessmentHighScore(record, "post") > 0 ? "post" : "pre") : "";
   const scoreTypeOptions = assessmentScoreTypes
-    .map((type) => `<option value="${escapeHtml(type.value)}">${escapeHtml(type.label)}</option>`)
+    .map((type) => `<option value="${escapeHtml(type.value)}" ${type.value === selectedScoreType ? "selected" : ""}>${escapeHtml(type.label)}</option>`)
     .join("");
+  const selectedSection = record?.sectionId || "";
+  const subjectOptions = assessmentSubjectOptions(selectedSection, record?.subjectId || "");
+  const teacherOptionsMarkup = assessmentSubjectTeacherOptions(record?.teacherUid || auth.currentUser?.uid || "");
+  const assessmentType = record ? assessmentDisplayType(record) : "";
   els.dashboardContent.insertAdjacentHTML("beforeend", `
     <div id="academicModal" class="modal-backdrop">
       <form id="assessmentForm" class="modal wide-modal">
@@ -7388,14 +7713,22 @@ function openAssessmentForm(record = null) {
           <button class="icon-button close-academic-modal" type="button" aria-label="Close">x</button>
         </div>
         <div class="form-grid learner-form-grid">
+          <label>School Year<input id="assessmentSchoolYear" value="${escapeHtml(record?.schoolYear || "")}" placeholder="Auto from section" readonly /></label>
           <label>Section<select id="assessmentSectionId" required><option value="">Select section</option>${sectionOptions}</select></label>
+          <label>Grade Level<input id="assessmentGradeLevel" value="${escapeHtml(record?.gradeLevel || "")}" placeholder="Auto from section" readonly /></label>
           <label>Term<select id="assessmentTerm" required>${optionList([...new Set(assessmentScopeOptions.filter((item) => activeAssessmentScopes().includes(item.key)).map((item) => item.term))], record?.term || "", "Select term")}</select></label>
+          <label>Subject<select id="assessmentSubjectId" required>${subjectOptions}</select></label>
+          <label>Subject Teacher<select id="assessmentTeacherUid" required>${teacherOptionsMarkup}</select></label>
+          <label>Assessment Type<select id="assessmentType" required>${optionList(assessmentTypeOptions(), assessmentType, "Select assessment type")}</select></label>
+          <label>Assessment Title<input id="assessmentTitle" value="${escapeHtml(record?.assessmentTitle || "")}" placeholder="e.g. General Mathematics Diagnostic Test" /></label>
+          <label>Date Administered<input id="assessmentDateAdministered" type="date" value="${escapeHtml(record?.dateAdministered || todayIso())}" /></label>
           <label>Score to Encode<select id="assessmentScoreType" required><option value="">Select score type</option>${scoreTypeOptions}</select></label>
-          <label>Default Highest Possible Score<input id="assessmentDefaultHighest" type="number" min="1" step="0.01" value="${escapeHtml(record ? getAssessmentHighScore(record, record.postTestScore ? "post" : "pre") : "")}" placeholder="Apply to all" /></label>
+          <label>Total Items<input id="assessmentDefaultHighest" type="number" min="1" step="0.01" value="${escapeHtml(record ? getAssessmentHighScore(record, record.postTestScore ? "post" : "pre") : "")}" placeholder="Apply to all" /></label>
           <div class="batch-actions">
             <button id="applyHighestToAll" class="secondary-button" type="button">Apply Highest to All</button>
           </div>
         </div>
+        <label class="modal-field">Remarks<textarea id="assessmentRemarks" rows="3">${escapeHtml(record?.remarks || "")}</textarea></label>
         <div id="assessmentBatchHost" class="batch-table-host"><p class="empty-state">Select a section, term, and score type to show students.</p></div>
         <div id="academicFormMessage" class="message hidden" role="status"></div>
         <div class="modal-actions">
@@ -7405,14 +7738,122 @@ function openAssessmentForm(record = null) {
       </form>
     </div>
   `);
+  syncAssessmentSectionFields();
   renderAssessmentBatchRows();
 }
 
-function findAssessmentRecord(sectionId, studentId, term) {
+function getAssessmentEditableClasses() {
+  if (currentUserProfile?.role !== "Teacher" || canViewAllAcademic()) return classRecordsCache.filter((section) => section.status !== "archived");
+  const teacherSectionIds = new Set(teacherWorkloadRecordsCache
+    .filter((record) => record.teacherId === auth.currentUser.uid && record.sectionId)
+    .map((record) => record.sectionId));
+  return classRecordsCache.filter((section) =>
+    section.status !== "archived"
+    && (section.adviserId === auth.currentUser.uid || teacherSectionIds.has(section.id))
+  );
+}
+
+function assessmentSubjectOptions(sectionId = "", selected = "") {
+  const workloads = teacherWorkloadRecordsCache.filter((record) =>
+    record.sectionId === sectionId
+    && (currentUserProfile?.role !== "Teacher" || canViewAllAcademic() || record.teacherId === auth.currentUser.uid)
+  );
+  const options = workloads.length
+    ? workloads.map((workload) => ({
+      value: workload.subjectId || `${workload.subjectName}:${workload.teacherId}`,
+      label: `${workload.subjectName || "Subject"}${workload.subjectArea ? ` (${workload.subjectArea})` : ""}`,
+    }))
+    : schoolSubjectRecordsCache
+      .filter((subject) => !sectionId || !subject.gradeLevel || subject.gradeLevel === getSelectedClass(sectionId)?.gradeLevel)
+      .map((subject) => ({ value: subject.id, label: `${subject.subjectName}${subject.subjectArea ? ` (${subject.subjectArea})` : ""}` }));
+  return `<option value="">Select subject</option>${options.map((option) => `<option value="${escapeHtml(option.value)}" ${option.value === selected ? "selected" : ""}>${escapeHtml(option.label)}</option>`).join("")}`;
+}
+
+function assessmentSubjectTeacherOptions(selected = "") {
+  const teachers = [...new Map([
+    ...academicTeachersCache,
+    ...teacherWorkloadRecordsCache.map((record) => ({ id: record.teacherId, fullName: record.teacherName, role: "Teacher" })),
+    currentUserProfile ? { id: auth.currentUser.uid, fullName: currentUserProfile.fullName || auth.currentUser.email, role: currentUserProfile.role } : null,
+  ].filter((teacher) => teacher?.id).map((teacher) => [teacher.id, teacher])).values()];
+  return `<option value="">Select subject teacher</option>${teachers
+    .map((teacher) => `<option value="${escapeHtml(teacher.id)}" ${teacher.id === selected ? "selected" : ""}>${escapeHtml(teacher.fullName || teacher.email || teacher.id)}</option>`)
+    .join("")}`;
+}
+
+function selectedAssessmentWorkload() {
+  const sectionId = document.querySelector("#assessmentSectionId")?.value || "";
+  const subjectId = document.querySelector("#assessmentSubjectId")?.value || "";
+  const teacherUid = document.querySelector("#assessmentTeacherUid")?.value || "";
+  return teacherWorkloadRecordsCache.find((record) =>
+    record.sectionId === sectionId
+    && (record.subjectId === subjectId || `${record.subjectName}:${record.teacherId}` === subjectId)
+    && (!teacherUid || record.teacherId === teacherUid)
+  ) || teacherWorkloadRecordsCache.find((record) =>
+    record.sectionId === sectionId
+    && (record.subjectId === subjectId || `${record.subjectName}:${record.teacherId}` === subjectId)
+  ) || null;
+}
+
+function syncAssessmentSectionFields() {
+  const section = getSelectedClass(document.querySelector("#assessmentSectionId")?.value || "");
+  document.querySelector("#assessmentSchoolYear").value = section?.schoolYear || "";
+  document.querySelector("#assessmentGradeLevel").value = section?.gradeLevel || "";
+  const subjectSelect = document.querySelector("#assessmentSubjectId");
+  if (subjectSelect) {
+    const current = subjectSelect.value;
+    subjectSelect.innerHTML = assessmentSubjectOptions(section?.id || "", current);
+  }
+}
+
+function syncAssessmentTeacherFromSubject() {
+  const workload = selectedAssessmentWorkload();
+  if (workload?.teacherId) {
+    document.querySelector("#assessmentTeacherUid").value = workload.teacherId;
+  }
+}
+
+function syncAssessmentScoreTypeFromType() {
+  const assessmentType = document.querySelector("#assessmentType")?.value || "";
+  const scoreType = document.querySelector("#assessmentScoreType");
+  if (!scoreType || scoreType.value) return;
+  if (assessmentType === "Diagnostic Test") scoreType.value = "pre";
+  if (["Quarterly Exam", "Post Test", "Long Test"].includes(assessmentType)) scoreType.value = "post";
+}
+
+function canEditAssessmentSelection(sectionId, teacherUid) {
+  if (canViewAllAcademic()) return true;
+  if (teacherUid === auth.currentUser.uid) {
+    return teacherWorkloadRecordsCache.some((record) => record.teacherId === auth.currentUser.uid && record.sectionId === sectionId)
+      || canEditSectionRecords(sectionId);
+  }
+  return canEditSectionRecords(sectionId);
+}
+
+function findAssessmentRecord(sectionId, studentId, term, subjectId = "", assessmentType = "", assessmentTitle = "", dateAdministered = "") {
+  const editingRecord = editingAssessmentId ? assessmentRecordsCache.find((record) => record.id === editingAssessmentId) : null;
+  if (editingRecord?.assessmentBatchId) {
+    const batchMatch = assessmentRecordsCache.find((record) =>
+      record.assessmentBatchId === editingRecord.assessmentBatchId
+      && record.studentId === studentId
+    );
+    if (batchMatch) return batchMatch;
+  }
+  if (editingRecord) {
+    const legacyGroupKey = assessmentGroupKey(editingRecord);
+    const legacyMatch = assessmentRecordsCache.find((record) =>
+      record.studentId === studentId
+      && assessmentGroupKey(record) === legacyGroupKey
+    );
+    if (legacyMatch) return legacyMatch;
+  }
   return assessmentRecordsCache.find((record) =>
     record.sectionId === sectionId
     && record.studentId === studentId
     && record.term === term
+    && (record.subjectId || "") === subjectId
+    && assessmentDisplayType(record) === assessmentType
+    && (record.assessmentTitle || "") === assessmentTitle
+    && (record.dateAdministered || "") === dateAdministered
   );
 }
 
@@ -7420,12 +7861,16 @@ function renderAssessmentBatchRows() {
   const sectionId = document.querySelector("#assessmentSectionId")?.value || "";
   const term = document.querySelector("#assessmentTerm")?.value || "";
   const scoreType = document.querySelector("#assessmentScoreType")?.value || "";
+  const subjectId = document.querySelector("#assessmentSubjectId")?.value || "";
+  const assessmentType = document.querySelector("#assessmentType")?.value || "";
+  const assessmentTitle = document.querySelector("#assessmentTitle")?.value.trim() || "";
+  const dateAdministered = document.querySelector("#assessmentDateAdministered")?.value || "";
   const isPostTest = scoreType === "post";
   const host = document.querySelector("#assessmentBatchHost");
   if (!host) return;
   const students = sectionActiveStudents(sectionId);
-  if (!sectionId || !term || !scoreType) {
-    host.innerHTML = `<p class="empty-state">Select a section, term, and score type to show students.</p>`;
+  if (!sectionId || !term || !subjectId || !assessmentType || !scoreType) {
+    host.innerHTML = `<p class="empty-state">Select a section, term, subject, assessment type, and score type to show students.</p>`;
     return;
   }
   if (!students.length) {
@@ -7438,7 +7883,7 @@ function renderAssessmentBatchRows() {
         <thead><tr><th class="assessment-sticky-name">Name</th><th class="assessment-sticky-score">${isPostTest ? "Term Exam" : "Diagnostic Test"}</th><th>${isPostTest ? "Term Exam Highest" : "Diagnostic Highest"}</th><th>Comparison</th></tr></thead>
         <tbody>
           ${students.map((student) => {
-            const existing = findAssessmentRecord(sectionId, student.id, term);
+            const existing = findAssessmentRecord(sectionId, student.id, term, subjectId, assessmentType, assessmentTitle, dateAdministered);
             const scoreInputClass = isPostTest ? "assessment-post-input" : "assessment-pre-input";
             const highInputClass = isPostTest ? "assessment-post-highest-input" : "assessment-pre-highest-input";
             const scoreValue = isPostTest ? existing?.postTestScore : existing?.preTestScore;
@@ -7462,8 +7907,24 @@ async function handleAssessmentFormSubmit(event) {
   event.preventDefault();
   const message = document.querySelector("#academicFormMessage");
   const section = getSelectedClass(document.querySelector("#assessmentSectionId").value);
-  if (!section || !canEditSectionRecords(section.id)) {
-    message.textContent = "You can only encode scores for your assigned section.";
+  const subjectId = document.querySelector("#assessmentSubjectId")?.value || "";
+  const teacherUid = document.querySelector("#assessmentTeacherUid")?.value || "";
+  const assessmentType = document.querySelector("#assessmentType")?.value || "";
+  const assessmentTitle = document.querySelector("#assessmentTitle")?.value.trim() || "";
+  const dateAdministered = document.querySelector("#assessmentDateAdministered")?.value || "";
+  const remarks = document.querySelector("#assessmentRemarks")?.value.trim() || "";
+  const workload = selectedAssessmentWorkload();
+  const subject = schoolSubjectRecordsCache.find((item) => item.id === subjectId);
+  const teacher = academicTeachersCache.find((item) => item.id === teacherUid)
+    || { fullName: workload?.teacherName || currentUserProfile?.fullName || auth.currentUser.email };
+  if (!section || !subjectId || !teacherUid || !assessmentType) {
+    message.textContent = "Select a section, subject, subject teacher, and assessment type.";
+    message.classList.add("error");
+    message.classList.remove("hidden");
+    return;
+  }
+  if (!canEditAssessmentSelection(section.id, teacherUid)) {
+    message.textContent = "You can only encode scores for your assigned subject and section.";
     message.classList.add("error");
     message.classList.remove("hidden");
     return;
@@ -7491,8 +7952,24 @@ async function handleAssessmentFormSubmit(event) {
   const students = sectionActiveStudents(section.id);
   try {
     let saved = 0;
+    const assessmentBatchId = editingAssessmentId
+      ? assessmentRecordsCache.find((record) => record.id === editingAssessmentId)?.assessmentBatchId || `assessment-${Date.now()}`
+      : `assessment-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const batchScores = students.map((student) => {
+      const field = document.querySelector(`.${scoreType === "pre" ? "assessment-pre-input" : "assessment-post-input"}[data-student-id="${CSS.escape(student.id)}"]`);
+      const highest = document.querySelector(`.assessment-highest-input[data-student-id="${CSS.escape(student.id)}"]`);
+      return { score: Number(field?.value || 0), highest: Number(highest?.value || 0), hasScore: Boolean(field?.value) };
+    }).filter((row) => row.hasScore || row.highest > 0);
+    const enteredScores = batchScores.map((row) => row.score);
+    const highestValues = batchScores.map((row) => row.highest).filter((value) => value > 0);
+    const numberOfLearners = batchScores.length || students.length;
+    const highestScore = enteredScores.length ? Math.max(...enteredScores) : 0;
+    const lowestScore = enteredScores.length ? Math.min(...enteredScores) : 0;
+    const meanScore = enteredScores.length ? enteredScores.reduce((sum, score) => sum + score, 0) / enteredScores.length : 0;
+    const meanHighest = highestValues.length ? highestValues.reduce((sum, score) => sum + score, 0) / highestValues.length : 0;
+    const batchMps = meanHighest ? (meanScore / meanHighest) * 100 : 0;
     for (const student of students) {
-      const existing = findAssessmentRecord(section.id, student.id, term);
+      const existing = findAssessmentRecord(section.id, student.id, term, subjectId, assessmentType, assessmentTitle, dateAdministered);
       const preField = document.querySelector(`.assessment-pre-input[data-student-id="${CSS.escape(student.id)}"]`);
       const postField = document.querySelector(`.assessment-post-input[data-student-id="${CSS.escape(student.id)}"]`);
       const highestField = document.querySelector(`.assessment-highest-input[data-student-id="${CSS.escape(student.id)}"]`);
@@ -7521,10 +7998,31 @@ async function handleAssessmentFormSubmit(event) {
       }
       const computed = calculateAssessmentValues(preTestScore, postTestScore, preHighestPossibleScore, postHighestPossibleScore);
       const data = {
+        assessmentBatchId,
         schoolYear: section.schoolYear,
         term,
+        quarter: term,
+        gradeLevel: section.gradeLevel || "",
         sectionId: section.id,
         sectionName: classLabel(section),
+        subjectId,
+        subjectName: workload?.subjectName || subject?.subjectName || document.querySelector("#assessmentSubjectId")?.selectedOptions?.[0]?.textContent?.replace(/\s+\(.+\)$/, "") || "Unspecified Subject",
+        subjectCategory: workload?.subjectArea || subject?.subjectArea || "",
+        subjectArea: workload?.subjectArea || subject?.subjectArea || "",
+        teacherUid,
+        teacherName: teacher.fullName || teacher.email || workload?.teacherName || "Unspecified Teacher",
+        teacherId: teacherUid,
+        assessmentType,
+        assessmentTitle,
+        dateAdministered,
+        totalItems: currentHighestPossibleScore,
+        numberOfLearners,
+        highestScore,
+        lowestScore,
+        meanScore: Number(meanScore.toFixed(2)),
+        mps: Number(batchMps.toFixed(2)),
+        proficiencyLevel: assessmentProficiencyLevel(batchMps),
+        remarks,
         adviserId: section.adviserId || "",
         studentId: student.id,
         studentName: `${student.lastName}, ${student.firstName}`,
@@ -7536,12 +8034,14 @@ async function handleAssessmentFormSubmit(event) {
         ...computed,
         encodedBy: auth.currentUser.uid,
         encodedByName: currentUserProfile.fullName || auth.currentUser.email,
+        createdBy: existing?.createdBy || auth.currentUser.uid,
+        createdByName: existing?.createdByName || currentUserProfile.fullName || auth.currentUser.email,
       };
       if (existing) {
         await updateDoc(doc(db, "assessments", existing.id), { ...data, updatedAt: serverTimestamp() });
         await createAuditLog("update", "Diagnostic Test & Exam", existing.id, existing, data);
       } else {
-        const created = await addDoc(collection(db, "assessments"), { ...data, encodedAt: serverTimestamp(), updatedAt: serverTimestamp() });
+        const created = await addDoc(collection(db, "assessments"), { ...data, encodedAt: serverTimestamp(), createdAt: serverTimestamp(), updatedAt: serverTimestamp() });
         await createAuditLog("create", "Diagnostic Test & Exam", created.id, null, data);
       }
       saved += 1;
@@ -7940,13 +8440,38 @@ function renderComplianceAnalytics() {
   const averageCompliance = groups.length
     ? Math.round(groups.reduce((sum, group) => sum + group.percentage, 0) / groups.length)
     : 0;
-  host.innerHTML = renderAttendanceKpiGrid([
-    ["Total Assignments", String(groups.length), "Grouped visible assignments"],
-    ["Pending Assignments", String(groups.filter((group) => group.status === "Pending").length), "No submissions yet"],
-    ["Overdue Assignments", String(groups.filter((group) => group.status === "Overdue").length), "Past due and incomplete"],
-    ["Average Compliance Rate", `${averageCompliance}%`, "Average submitted rate"],
-    ["Fully Completed Assignments", String(groups.filter((group) => ["Completed", "Reviewed", "Approved"].includes(group.status)).length), "100% submitted"],
-  ]);
+  const categoryRows = groups.map((group) => [formatReportAssignmentType(group.reportType), group.percentage])
+    .sort((a, b) => a[1] - b[1])
+    .slice(0, 8);
+  const statusRows = groupCountRows(groups, "status");
+  const monthlyRows = groupCountRows(groups.filter((group) => ["Completed", "Reviewed", "Approved"].includes(group.status)), (group) =>
+    analyticsMonthKey(analyticsDateValue(group.records[0], ["submittedAt", "updatedAt", "createdAt"])), "No month")
+    .filter(([label]) => label !== "No month")
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .slice(-6);
+  const personnelRows = groupCountRows(groups.flatMap((group) => group.records.filter(isComplianceSubmitted)), "assignedToName").slice(0, 8);
+  const lowGroup = groups.filter((group) => group.percentage < 50).sort((a, b) => a.percentage - b.percentage)[0];
+  const overduePersonnel = new Set(groups.filter((group) => group.status === "Overdue").flatMap((group) => group.records.map((record) => record.assignedToUid || record.assignedToName))).size;
+  host.innerHTML = `
+    ${renderAttendanceKpiGrid([
+      ["Total Assignments", String(groups.length), "Grouped visible assignments"],
+      ["Average Compliance Rate", `${averageCompliance}%`, "Average submitted rate"],
+      ["Overdue Reports", String(groups.filter((group) => group.status === "Overdue").length), "Past due and incomplete"],
+      ["Fully Completed", String(groups.filter((group) => ["Completed", "Reviewed", "Approved"].includes(group.status)).length), "100% submitted"],
+      ["Pending Assignments", String(groups.filter((group) => group.status === "Pending").length), "No submissions yet"],
+    ])}
+    <div class="chart-grid attendance-chart-grid">
+      ${renderSummaryChart("Compliance by Report Category", categoryRows)}
+      ${renderAnalyticsPieChart("Submission Status Distribution", statusRows)}
+      ${renderVerticalBarChart("Monthly Compliance Trend", monthlyRows)}
+      ${renderSummaryChart("Personnel Compliance Ranking", personnelRows)}
+      ${renderInsightPanel("Report Compliance Alerts", [
+        lowGroup ? `${lowGroup.title} has only ${lowGroup.percentage}% compliance.` : "",
+        overduePersonnel ? `${overduePersonnel} personnel have overdue report assignments.` : "",
+        averageCompliance >= 80 ? "Overall report compliance is in a healthy range." : "",
+      ])}
+    </div>
+  `;
 }
 
 function renderComplianceTable() {
@@ -7976,6 +8501,119 @@ function renderComplianceTable() {
       </tbody>
     </table>
   `;
+}
+
+function analyticsMonthKey(value) {
+  if (!value) return "";
+  const date = value.toDate ? value.toDate() : new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function analyticsDateValue(record, fields = ["date", "createdAt", "updatedAt"]) {
+  const field = fields.find((name) => record?.[name]);
+  return field ? record[field] : "";
+}
+
+function groupCountRows(records, getter, fallback = "Not recorded") {
+  const getValue = typeof getter === "function" ? getter : (record) => record?.[getter];
+  const totals = new Map();
+  records.forEach((record) => {
+    const label = String(getValue(record) || "").trim() || fallback;
+    totals.set(label, (totals.get(label) || 0) + 1);
+  });
+  return [...totals.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+}
+
+function groupSumRows(records, getter, valueGetter, fallback = "Not recorded") {
+  const getLabel = typeof getter === "function" ? getter : (record) => record?.[getter];
+  const totals = new Map();
+  records.forEach((record) => {
+    const label = String(getLabel(record) || "").trim() || fallback;
+    totals.set(label, (totals.get(label) || 0) + toSafeNumber(valueGetter(record)));
+  });
+  return [...totals.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+}
+
+function renderAnalyticsPieChart(title, rows, emptyMessage = "No data available yet.") {
+  const cleanRows = rows.filter(([, value]) => Number(value) > 0);
+  const total = cleanRows.reduce((sum, [, value]) => sum + Number(value || 0), 0);
+  if (!total) {
+    return `<article class="chart-card analytics-chart-card"><h3>${escapeHtml(title)}</h3><p class="empty-state">${escapeHtml(emptyMessage)}</p></article>`;
+  }
+  let currentPercent = 0;
+  const segments = cleanRows.map(([, value], index) => {
+    const share = (Number(value) / total) * 100;
+    const start = currentPercent;
+    currentPercent += share;
+    return `var(--financial-chart-${(index % 8) + 1}) ${start}% ${currentPercent}%`;
+  });
+  return `
+    <article class="chart-card analytics-chart-card">
+      <h3>${escapeHtml(title)}</h3>
+      <div class="financial-pie-layout">
+        <div class="financial-pie" style="background: conic-gradient(${segments.join(", ")});" role="img" aria-label="${escapeAttribute(`${title} total ${total}`)}">
+          <span>${escapeHtml(String(total))}</span>
+          <small>Total</small>
+        </div>
+        <div class="financial-chart-legend">
+          ${cleanRows.map(([label, value], index) => `
+            <div class="financial-legend-row" title="${escapeAttribute(`${label}: ${value}`)}">
+              <i style="background: var(--financial-chart-${(index % 8) + 1});"></i>
+              <span>${escapeHtml(label)}</span>
+              <strong>${escapeHtml(String(value))}</strong>
+              <small>${total ? ((Number(value) / total) * 100).toFixed(1) : "0.0"}%</small>
+            </div>
+          `).join("")}
+        </div>
+      </div>
+    </article>
+  `;
+}
+
+function renderVerticalBarChart(title, rows, emptyMessage = "No trend data available yet.") {
+  const cleanRows = rows.length ? rows : [["No data", 0]];
+  const max = Math.max(...cleanRows.map(([, value]) => Number(value) || 0), 0);
+  if (!max) {
+    return `<article class="chart-card analytics-chart-card"><h3>${escapeHtml(title)}</h3><p class="empty-state">${escapeHtml(emptyMessage)}</p></article>`;
+  }
+  return `
+    <article class="chart-card analytics-chart-card">
+      <h3>${escapeHtml(title)}</h3>
+      <div class="financial-bar-chart analytics-vertical-chart">
+        ${cleanRows.map(([label, value]) => {
+          const height = Math.max((Number(value || 0) / max) * 100, value > 0 ? 6 : 0);
+          return `
+            <div class="financial-bar-column" title="${escapeAttribute(`${label}: ${value}`)}">
+              <span>${escapeHtml(String(value))}</span>
+              <div class="financial-bar-track"><i style="height: ${height}%"></i></div>
+              <strong>${escapeHtml(label)}</strong>
+            </div>
+          `;
+        }).join("")}
+      </div>
+    </article>
+  `;
+}
+
+function renderInsightPanel(title, insights = []) {
+  const items = insights.filter(Boolean);
+  return `
+    <article class="chart-card insight-panel">
+      <h3>${escapeHtml(title)}</h3>
+      ${items.length
+        ? `<ul>${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`
+        : `<p class="empty-state">Insights will appear as more records are encoded.</p>`}
+    </article>
+  `;
+}
+
+function compareLatestTwo(rows) {
+  if (rows.length < 2) return { current: 0, previous: 0, change: 0 };
+  const sorted = [...rows].sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+  const previous = Number(sorted.at(-2)?.[1] || 0);
+  const current = Number(sorted.at(-1)?.[1] || 0);
+  return { current, previous, change: current - previous };
 }
 
 function renderComplianceGroupRows(group) {
@@ -8482,7 +9120,7 @@ async function renderLearnerMonitoringModule() {
       </div>
     </section>
 
-    <section id="learnerAnalytics" class="chart-grid">
+    <section id="learnerAnalytics" class="attendance-analytics">
       <p class="empty-state">Loading learner analytics...</p>
     </section>
 
@@ -8581,12 +9219,75 @@ function applyLearnerFilters() {
 function renderLearnerAnalytics() {
   const chartHost = document.querySelector("#learnerAnalytics");
   if (!chartHost) return;
+  const records = filteredLearnerRecords;
+  const highRisk = records.filter((record) => record.riskLevel === "High Risk");
+  const moderateRisk = records.filter((record) => record.riskLevel === "Needs Monitoring");
+  const lowRisk = records.filter((record) => record.riskLevel === "Stable");
+  const activeInterventions = records.filter((record) => ["Not Started", "Ongoing", "Referred", "Unresolved"].includes(record.interventionStatus));
+  const resolvedCases = records.filter((record) => ["Resolved", "Closed"].includes(record.status) || record.interventionStatus === "Resolved");
+  const concernRows = groupCountRows(records, "concernType").slice(0, 8);
+  const sectionRows = groupCountRows(records, (record) => [record.gradeLevel, record.section].filter(Boolean).join(" "));
+  const monthlyRows = groupCountRows(records, (record) => analyticsMonthKey(analyticsDateValue(record, ["createdAt", "updatedAt", "interventionDate"])), "No date")
+    .filter(([label]) => label !== "No date")
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .slice(-6);
+  const trend = compareLatestTwo(monthlyRows);
+  const urgent = records
+    .map((record) => ({
+      record,
+      score:
+        (record.riskLevel === "High Risk" ? 4 : record.riskLevel === "Needs Monitoring" ? 2 : 0)
+        + (["Not Started", "Unresolved", "Ongoing"].includes(record.interventionStatus) ? 2 : 0)
+        + (["For Intervention", "Under Intervention", "Active Monitoring"].includes(record.status) ? 1 : 0)
+        + (record.attendanceStatus || record.concernType === "Attendance" ? 1 : 0),
+    }))
+    .filter((item) => item.score > 0)
+    .sort((a, b) => b.score - a.score || (a.record.learnerName || "").localeCompare(b.record.learnerName || ""))
+    .slice(0, 10);
+  const insights = [
+    sectionRows[0] ? `${sectionRows[0][0]} has the highest number of at-risk learners.` : "",
+    concernRows[0] ? `${concernRows[0][0]} is the most common concern.` : "",
+    trend.change > 0 ? `Risk cases increased by ${trend.change} this month.` : trend.change < 0 ? `Risk cases decreased by ${Math.abs(trend.change)} this month.` : "",
+    highRisk.length ? `${highRisk.length} high-risk learner${highRisk.length === 1 ? "" : "s"} need close monitoring.` : "",
+  ];
 
   chartHost.innerHTML = `
-    ${renderDistributionChart("Risk Level Distribution", learnerRiskLevels, "riskLevel")}
-    ${renderDistributionChart("Concern Type Distribution", learnerConcernTypes, "concernType")}
-    ${renderDistributionChart("Intervention Status Distribution", learnerInterventionStatuses, "interventionStatus")}
-    ${renderDistributionChart("Learners-at-Risk by Grade Level", uniqueOptions(filteredLearnerRecords, "gradeLevel"), "gradeLevel")}
+    ${renderAttendanceKpiGrid([
+      ["Total At-Risk Learners", String(records.length), "Within current filters"],
+      ["High Risk Learners", String(highRisk.length), "Immediate attention"],
+      ["Moderate Risk Learners", String(moderateRisk.length), "Needs monitoring"],
+      ["Low Risk Learners", String(lowRisk.length), "Stable risk level"],
+      ["Active Interventions", String(activeInterventions.length), "Not yet resolved"],
+      ["Resolved Cases", String(resolvedCases.length), "Resolved or closed"],
+    ])}
+    <div class="chart-grid analytics-wide-grid">
+      ${renderAnalyticsPieChart("Risk Level Distribution", learnerRiskLevels.map((level) => [level, records.filter((record) => record.riskLevel === level).length]))}
+      ${renderSummaryChart("Top Concern Types", concernRows)}
+      ${renderVerticalBarChart("Monthly At-Risk Trend", monthlyRows)}
+      ${renderSummaryChart("Strand/Section Risk Comparison", sectionRows.slice(0, 8))}
+      ${renderInsightPanel("Smart Learner Insights", insights)}
+      ${renderUrgentLearnerList(urgent)}
+    </div>
+  `;
+}
+
+function renderUrgentLearnerList(items = []) {
+  return `
+    <article class="chart-card urgent-list-card">
+      <h3>Urgent Intervention List</h3>
+      ${items.length ? `
+        <div class="urgent-list">
+          ${items.map(({ record, score }) => `
+            <div>
+              <strong>${escapeHtml(record.learnerName || "No learner name")}</strong>
+              <span class="badge risk-${statusClass(record.riskLevel)}">${escapeHtml(record.riskLevel || "Stable")}</span>
+              <small>${escapeHtml([record.gradeLevel, record.section, record.concernType].filter(Boolean).join(" | "))}</small>
+              <small>${escapeHtml(record.interventionStatus || "No intervention status")} | Priority ${score}</small>
+            </div>
+          `).join("")}
+        </div>
+      ` : `<p class="empty-state">No urgent learners in the current view.</p>`}
+    </article>
   `;
 }
 
@@ -9630,7 +10331,7 @@ async function renderEnrollmentModule() {
       </div>
     </section>
 
-    <section id="enrollmentAnalytics" class="chart-grid">
+    <section id="enrollmentAnalytics" class="attendance-analytics">
       <p class="empty-state">Loading enrollment analytics...</p>
     </section>
 
@@ -9694,10 +10395,42 @@ function applyEnrollmentFilters() {
 function renderEnrollmentAnalytics() {
   const chartHost = document.querySelector("#enrollmentAnalytics");
   if (!chartHost) return;
+  const visibleEnrollment = activeEnrollmentView === "enrollment" ? filteredEnrollmentModuleRecords : enrollmentRecordsCache;
+  const male = visibleEnrollment.filter((record) => ["M", "Male"].includes(record.sex)).length;
+  const female = visibleEnrollment.filter((record) => ["F", "Female"].includes(record.sex)).length;
+  const transferIn = transferRecordsCache.filter((record) => record.transferType === "Transfer In").length;
+  const transferOut = transferRecordsCache.filter((record) => record.transferType === "Transfer Out").length;
+  const dropouts = dropoutRecordsCache.length + visibleEnrollment.filter((record) => normalizeStudentStatus(record.status) === "Dropout").length;
+  const retentionBase = visibleEnrollment.length + dropouts;
+  const retentionRate = retentionBase ? ((visibleEnrollment.length / retentionBase) * 100).toFixed(1) : "0.0";
+  const strandRows = groupCountRows(visibleEnrollment, (record) => record.strand || record.track || record.sectionName || record.section || record.gradeLevel).slice(0, 8);
+  const gradeRows = groupCountRows(visibleEnrollment, "gradeLevel");
+  const trendRows = groupCountRows(visibleEnrollment, (record) => analyticsMonthKey(record.enrollmentDate || record.createdAt), "No month")
+    .filter(([label]) => label !== "No month")
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .slice(-6);
   chartHost.innerHTML = `
-    ${renderEnrollmentChart("Enrollment by Grade Level", enrollmentRecordsCache, uniqueOptions(enrollmentRecordsCache, "gradeLevel"), "gradeLevel")}
-    ${renderEnrollmentChart("Male/Female Distribution", enrollmentRecordsCache, ["M", "F"], "sex")}
-    ${renderEnrollmentChart("Student Status Summary", enrollmentRecordsCache.map((record) => ({ ...record, status: normalizeStudentStatus(record.status) })), studentStatuses, "status")}
+    ${renderAttendanceKpiGrid([
+      ["Total Enrollment", String(visibleEnrollment.length), "Visible enrolled learners"],
+      ["Male Learners", String(male), "Current view"],
+      ["Female Learners", String(female), "Current view"],
+      ["Transfer In", String(transferIn), "Mobility records"],
+      ["Transfer Out", String(transferOut), "Mobility records"],
+      ["Dropout Count", String(dropouts), "Dropout records/status"],
+      ["Retention Rate", `${retentionRate}%`, "Enrollment over enrollment plus dropouts"],
+    ])}
+    <div class="chart-grid attendance-chart-grid">
+      ${renderAnalyticsPieChart("Enrollment by Strand/Section", strandRows)}
+      ${renderVerticalBarChart("Enrollment Trend", trendRows)}
+      ${renderAnalyticsPieChart("Male/Female Distribution", [["Male", male], ["Female", female]])}
+      ${renderSummaryChart("Grade Level Comparison", gradeRows)}
+      ${renderEnrollmentChart("Student Status Summary", visibleEnrollment.map((record) => ({ ...record, status: normalizeStudentStatus(record.status) })), studentStatuses, "status")}
+      ${renderInsightPanel("Enrollment Insights", [
+        strandRows[0] ? `${strandRows[0][0]} has the highest enrollment.` : "",
+        transferOut > transferIn ? "Transfer out records exceed transfer in records." : "",
+        dropouts ? `${dropouts} dropout record${dropouts === 1 ? "" : "s"} need retention review.` : "",
+      ])}
+    </div>
   `;
 }
 
@@ -10414,12 +11147,26 @@ function renderFinancialReportAnalytics() {
   const remaining = totalAllocated - totalSpent;
   const pending = records.filter((record) => ["Draft", "Submitted"].includes(record.status)).length;
   const approved = records.filter((record) => record.status === "Approved").length;
+  const budgetUtilization = totalAllocated ? (totalSpent / totalAllocated) * 100 : 0;
+  const categoryTotals = groupFinancialSpending(records, financialCategories, "category", "Uncategorized");
+  const fundTotals = groupFinancialSpending(records, financialFundSources, "fundSource", "Unspecified");
+  const largestCategory = categoryTotals[0]?.label || "None";
+  const largestFund = fundTotals[0]?.label || "None";
+  const quarterTotals = financialQuarters.map((quarter) => [
+    quarter,
+    records.filter((record) => record.quarter === quarter).reduce((sum, record) => sum + getFinancialAmountSpent(record), 0),
+  ]);
+  const q2VsQ1 = quarterTotals[0]?.[1] ? ((quarterTotals[1]?.[1] || 0) - quarterTotals[0][1]) / quarterTotals[0][1] * 100 : 0;
 
   host.innerHTML = `
     ${renderAttendanceKpiGrid([
       ["Total Allocated", formatPeso(totalAllocated), "Approved or planned funds"],
       ["Total Spent", formatPeso(totalSpent), "Recorded expenditures"],
       ["Remaining Balance", formatPeso(remaining), remaining < 0 ? "Overspent balance" : "Available balance"],
+      ["Budget Utilization", `${budgetUtilization.toFixed(1)}%`, "Spent against allocation"],
+      ["Largest Spending Category", largestCategory, "Highest amount spent"],
+      ["Largest Fund Source", largestFund, "Largest spending source"],
+      ["Remaining Balance Alert", remaining < 0 ? "Overspent" : budgetUtilization >= 80 ? "Watch" : "Healthy", remaining < 0 ? "Spending exceeds allocation" : "Based on utilization"],
       ["Number of Reports", String(records.length), "Visible report records"],
       ["Pending / Submitted", String(pending), "Draft or submitted records"],
       ["Approved Reports", String(approved), "Approved financial reports"],
@@ -10428,6 +11175,13 @@ function renderFinancialReportAnalytics() {
       ${renderFinancialPieChart("Spending by Category", records, financialCategories, "category", "Uncategorized", "No financial data available yet.")}
       ${renderFinancialPieChart("Spending by Fund Source", records, financialFundSources, "fundSource", "Unspecified", "No fund source data available yet.")}
       ${renderFinancialQuarterlyChart(records)}
+      ${renderFinancialUtilizationChart(records)}
+      ${renderInsightPanel("Financial Insights", [
+        largestCategory !== "None" ? `${largestCategory} accounts for the highest spending.` : "",
+        q2VsQ1 > 0 ? `Q2 spending exceeded Q1 by ${q2VsQ1.toFixed(1)}%.` : q2VsQ1 < 0 ? `Q2 spending is ${Math.abs(q2VsQ1).toFixed(1)}% lower than Q1.` : "",
+        budgetUtilization >= 80 ? "Budget utilization exceeded 80% and needs monitoring." : "",
+        remaining < 0 ? "Remaining balance is negative. Review overspending immediately." : "",
+      ])}
     </div>
   `;
 }
@@ -10543,6 +11297,16 @@ function renderFinancialQuarterlyChart(records) {
       </div>
     </article>
   `;
+}
+
+function renderFinancialUtilizationChart(records) {
+  const rows = financialQuarters.map((quarter) => {
+    const quarterRecords = records.filter((record) => record.quarter === quarter);
+    const allocated = quarterRecords.reduce((sum, record) => sum + toSafeNumber(record.amountAllocated), 0);
+    const spent = quarterRecords.reduce((sum, record) => sum + toSafeNumber(record.amountSpent), 0);
+    return [quarter, allocated ? Math.round((spent / allocated) * 100) : 0];
+  });
+  return renderSummaryChart("Budget Utilization Comparison", rows);
 }
 
 function renderFinancialReportTable(host) {
@@ -12818,13 +13582,22 @@ function bindEvents() {
     if (event.target.id === "workloadSectionId") {
       syncTeachingLoadSubjectOptions();
     }
-    if (["assessmentSearch", "assessmentSchoolYearFilter", "assessmentTermFilter", "assessmentSectionFilter"].includes(event.target.id)) {
+    if (["assessmentSearch", "assessmentSchoolYearFilter", "assessmentTermFilter", "assessmentGradeFilter", "assessmentSectionFilter", "assessmentSubjectFilter", "assessmentTeacherFilter", "assessmentTypeFilter", "assessmentMpsFilter"].includes(event.target.id)) {
       applyAssessmentFilters();
     }
     if (event.target.id === "attendanceSectionId") {
       renderAttendanceBatchRows();
     }
-    if (["assessmentSectionId", "assessmentTerm", "assessmentScoreType"].includes(event.target.id)) {
+    if (event.target.id === "assessmentSectionId") {
+      syncAssessmentSectionFields();
+      renderAssessmentBatchRows();
+    }
+    if (event.target.id === "assessmentSubjectId") {
+      syncAssessmentTeacherFromSubject();
+      renderAssessmentBatchRows();
+    }
+    if (["assessmentTerm", "assessmentScoreType", "assessmentType", "assessmentTitle", "assessmentDateAdministered"].includes(event.target.id)) {
+      if (event.target.id === "assessmentType") syncAssessmentScoreTypeFromType();
       renderAssessmentBatchRows();
     }
     if (event.target.classList?.contains("assessment-pre-input") || event.target.classList?.contains("assessment-post-input") || event.target.classList?.contains("assessment-highest-input")) {
@@ -12832,7 +13605,15 @@ function bindEvents() {
       const sectionId = document.querySelector("#assessmentSectionId")?.value || "";
       const term = document.querySelector("#assessmentTerm")?.value || "";
       const scoreType = document.querySelector("#assessmentScoreType")?.value || "";
-      const existing = findAssessmentRecord(sectionId, studentId, term);
+      const existing = findAssessmentRecord(
+        sectionId,
+        studentId,
+        term,
+        document.querySelector("#assessmentSubjectId")?.value || "",
+        document.querySelector("#assessmentType")?.value || "",
+        document.querySelector("#assessmentTitle")?.value.trim() || "",
+        document.querySelector("#assessmentDateAdministered")?.value || ""
+      );
       const preField = document.querySelector(`.assessment-pre-input[data-student-id="${CSS.escape(studentId)}"]`);
       const postField = document.querySelector(`.assessment-post-input[data-student-id="${CSS.escape(studentId)}"]`);
       const pre = Number(preField?.value ?? existing?.preTestScore ?? 0);
@@ -12881,7 +13662,14 @@ function bindEvents() {
     if (["attendanceSectionId", "attendanceDate"].includes(event.target.id)) {
       renderAttendanceBatchRows();
     }
-    if (["assessmentSectionId", "assessmentTerm", "assessmentScoreType"].includes(event.target.id)) {
+    if (event.target.id === "assessmentSectionId") {
+      syncAssessmentSectionFields();
+    }
+    if (event.target.id === "assessmentSubjectId") {
+      syncAssessmentTeacherFromSubject();
+    }
+    if (["assessmentSectionId", "assessmentTerm", "assessmentScoreType", "assessmentSubjectId", "assessmentType", "assessmentTitle", "assessmentDateAdministered"].includes(event.target.id)) {
+      if (event.target.id === "assessmentType") syncAssessmentScoreTypeFromType();
       renderAssessmentBatchRows();
     }
     if (["gradeWorkloadId", "gradeSubmissionTerm"].includes(event.target.id)) {
