@@ -134,7 +134,7 @@ const els = {
 const WORKLOAD_RULES = {
   defaultCoreSubjectHours: 4,
   defaultElectiveHours: 2,
-  advisoryClassHours: 2,
+  advisoryClassHours: 5,
   extraPreparationPoint: 1,
   normalPreparationAllowance: 3,
   statusThresholds: [
@@ -144,6 +144,8 @@ const WORKLOAD_RULES = {
     { max: Infinity, label: "Overloaded", category: "Critical" },
   ],
 };
+
+const DELETE_VERIFICATION_CODE = "lupinthestalker";
 
 let auth;
 let db;
@@ -181,6 +183,7 @@ let studentRecordsCache = [];
 let filteredStudentRecords = [];
 let studentAttendanceRecordsCache = [];
 let filteredStudentAttendanceRecords = [];
+const expandedStudentAttendanceSections = new Set();
 let teacherAttendanceRecordsCache = [];
 let filteredTeacherAttendanceRecords = [];
 let schoolSubjectRecordsCache = [];
@@ -4045,6 +4048,17 @@ function buildTeacherWorkloadSummaries() {
       visibleTeacherIds.add(record.teacherId);
     }
   });
+  classRecordsCache.forEach((section) => {
+    if (section.adviserId && !visibleTeacherIds.has(section.adviserId)) {
+      academicTeachersCache.push({
+        id: section.adviserId,
+        fullName: section.adviserName || section.adviserId,
+        role: "Teacher",
+        department: "",
+      });
+      visibleTeacherIds.add(section.adviserId);
+    }
+  });
 
   return academicTeachersCache.map((teacher) => {
     const teachingAssignments = teacherWorkloadRecordsCache.filter((record) => record.teacherId === teacher.id);
@@ -4086,6 +4100,7 @@ function buildTeacherWorkloadSummaries() {
       subjectAreas: [...new Set(teachingAssignments.map((record) => record.subjectArea).filter(Boolean))],
       teachingHours,
       preparations,
+      advisoryScore,
       ancillaryScore,
       teachingLoadScore,
       workloadScore,
@@ -4783,7 +4798,9 @@ function applyClassFilters() {
 
 function openClassForm(record = null) {
   editingClassId = record?.id || null;
-  editingClassReturnModule = els.dashboardTitle.textContent === "School Setup" ? "School Setup" : "Classes / Sections";
+  editingClassReturnModule = ["School Setup", "Teacher Workload"].includes(els.dashboardTitle.textContent)
+    ? els.dashboardTitle.textContent
+    : "Classes / Sections";
   els.dashboardContent.insertAdjacentHTML("beforeend", `
     <div id="academicModal" class="modal-backdrop">
       <form id="classForm" class="modal">
@@ -4848,6 +4865,8 @@ async function handleClassFormSubmit(event) {
     document.querySelector("#academicModal")?.remove();
     if (editingClassReturnModule === "School Setup") {
       await renderSchoolSetupModule();
+    } else if (editingClassReturnModule === "Teacher Workload") {
+      await renderTeacherWorkloadModule();
     } else {
       await renderClassesModule();
     }
@@ -5493,57 +5512,142 @@ function applyStudentAttendanceFilters() {
     host.innerHTML = `<p class="empty-state">No attendance records match the current filters.</p>`;
     return;
   }
+  renderStudentAttendanceSectionTable(host);
+}
+
+function renderStudentAttendanceSectionTable(host) {
   const dateKeys = [...new Set(filteredStudentAttendanceRecords.map((record) => record.attendanceDate || record.attendanceWeek).filter(Boolean))]
     .sort((a, b) => a.localeCompare(b));
-  const studentRows = sortStudentsSf1Order(
-    [...new Map(filteredStudentAttendanceRecords.map((record) => {
-      const cachedStudent = studentRecordsCache.find((student) => student.id === record.studentId);
-      return [record.studentId || record.studentName, {
-        id: record.studentId || record.studentName,
-        lastName: cachedStudent?.lastName || record.studentName || "",
-        firstName: cachedStudent?.firstName || "",
-        middleName: cachedStudent?.middleName || "",
-        sex: cachedStudent?.sex || "",
-        sectionId: record.sectionId || "",
-        sectionName: record.sectionName || "",
-        displayName: cachedStudent ? `${cachedStudent.lastName}, ${cachedStudent.firstName} ${cachedStudent.middleName || ""}`.trim() : record.studentName || "",
-      }];
-    })).values()]
-  );
+  const sections = buildStudentAttendanceSectionRows();
   host.innerHTML = `
     <table class="academic-table attendance-record-table">
       <thead>
         <tr>
-          <th>Name</th>
+          <th>Section</th>
+          <th>Students</th>
           ${dateKeys.map((dateKey) => `<th class="attendance-date-heading"><span>${escapeHtml(dateKey.includes("-") ? shortDateLabel(dateKey) : dateKey)}</span><small>${escapeHtml(dateKey)}</small></th>`).join("")}
+          <th>Action</th>
         </tr>
       </thead>
       <tbody>
-        ${studentRows.map((student) => `
-          <tr>
-            <td>
-              <strong>${escapeHtml(student.displayName)}</strong>
-              <small class="row-note">${escapeHtml(student.sectionName || "")}</small>
-            </td>
-            ${dateKeys.map((dateKey) => {
-              const record = filteredStudentAttendanceRecords.find((item) =>
-                (item.studentId || item.studentName) === student.id
-                && (item.attendanceDate || item.attendanceWeek) === dateKey
-              );
-              if (!record) return `<td class="attendance-record-cell"><span class="muted-mark">-</span></td>`;
-              const isPresent = record.status === "Present";
-              const statusMark = isPresent ? "&#10003;" : "&#215;";
-              const statusClass = isPresent ? "present" : "absent";
-              return `
-                <td class="attendance-record-cell" title="${escapeHtml(record.status || "")}">
-                  <span class="attendance-status-mark ${statusClass}" role="img" aria-label="${escapeHtml(`${student.displayName} ${dateKey} ${record.status || ""}`)}">${statusMark}</span>
-                </td>
-              `;
-            }).join("")}
-          </tr>
-        `).join("")}
+        ${sections.map((section) => renderStudentAttendanceSectionRows(section, dateKeys)).join("")}
       </tbody>
     </table>
+  `;
+}
+
+function buildStudentAttendanceSectionRows() {
+  const sectionMap = new Map();
+  filteredStudentAttendanceRecords.forEach((record) => {
+    const key = record.sectionId || record.sectionName || "unassigned";
+    if (!sectionMap.has(key)) {
+      const cachedSection = classRecordsCache.find((section) => section.id === record.sectionId);
+      sectionMap.set(key, {
+        id: key,
+        sectionId: record.sectionId || "",
+        sectionName: record.sectionName || (cachedSection ? classLabel(cachedSection) : "Unassigned section"),
+        records: [],
+      });
+    }
+    sectionMap.get(key).records.push(record);
+  });
+  return [...sectionMap.values()].sort((a, b) => a.sectionName.localeCompare(b.sectionName));
+}
+
+function renderStudentAttendanceSectionRows(section, dateKeys) {
+  const isExpanded = expandedStudentAttendanceSections.has(section.id);
+  const studentCount = attendanceUniqueCount(section.records, (record) => record.studentId || record.studentName);
+  return `
+    <tr class="attendance-section-row">
+      <td>
+        <strong>${escapeHtml(section.sectionName)}</strong>
+        <small class="row-note">${escapeHtml(`${section.records.length} attendance records`)}</small>
+      </td>
+      <td>${escapeHtml(String(studentCount))}</td>
+      ${dateKeys.map((dateKey) => renderStudentAttendanceSectionPercent(section, dateKey)).join("")}
+      <td>
+        <button class="secondary-button toggle-student-attendance-section" type="button" data-section-id="${escapeAttribute(section.id)}">
+          ${isExpanded ? "Collapse" : "Expand"}
+        </button>
+      </td>
+    </tr>
+    ${isExpanded ? renderStudentAttendanceDetailRow(section, dateKeys) : ""}
+  `;
+}
+
+function renderStudentAttendanceSectionPercent(section, dateKey) {
+  const records = section.records.filter((record) => attendanceDateValue(record) === dateKey);
+  if (!records.length) return `<td class="attendance-record-cell"><span class="muted-mark">-</span></td>`;
+  const present = records.filter((record) => ["Present", "Late"].includes(record.status)).length;
+  const rate = records.length ? (present / records.length) * 100 : 0;
+  const absent = records.filter((record) => record.status === "Absent").length;
+  return `
+    <td class="attendance-record-cell" title="${escapeAttribute(`${present}/${records.length} present or late, ${absent} absent`)}">
+      <strong>${rate.toFixed(0)}%</strong>
+      <small class="row-note">${escapeHtml(`${present}/${records.length}`)}</small>
+    </td>
+  `;
+}
+
+function renderStudentAttendanceDetailRow(section, dateKeys) {
+  const students = getStudentAttendanceDetailStudents(section);
+  return `
+    <tr class="attendance-detail-row">
+      <td colspan="${dateKeys.length + 3}">
+        <div class="table-wrap attendance-detail-table">
+          <table class="academic-table attendance-record-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                ${dateKeys.map((dateKey) => `<th class="attendance-date-heading"><span>${escapeHtml(dateKey.includes("-") ? shortDateLabel(dateKey) : dateKey)}</span><small>${escapeHtml(dateKey)}</small></th>`).join("")}
+              </tr>
+            </thead>
+            <tbody>
+              ${students.map((student) => `
+                <tr>
+                  <td>
+                    <strong>${escapeHtml(student.displayName)}</strong>
+                    <small class="row-note">${escapeHtml(section.sectionName)}</small>
+                  </td>
+                  ${dateKeys.map((dateKey) => renderStudentAttendanceDetailCell(section, student, dateKey)).join("")}
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>
+        </div>
+      </td>
+    </tr>
+  `;
+}
+
+function getStudentAttendanceDetailStudents(section) {
+  const recordStudents = section.records.map((record) => {
+    const cachedStudent = studentRecordsCache.find((student) => student.id === record.studentId);
+    return {
+      id: record.studentId || record.studentName,
+      lastName: cachedStudent?.lastName || record.studentName || "",
+      firstName: cachedStudent?.firstName || "",
+      middleName: cachedStudent?.middleName || "",
+      displayName: cachedStudent ? `${cachedStudent.lastName}, ${cachedStudent.firstName} ${cachedStudent.middleName || ""}`.trim() : record.studentName || "No learner name",
+    };
+  });
+  return sortStudentsSf1Order([...new Map(recordStudents.map((student) => [student.id, student])).values()]);
+}
+
+function renderStudentAttendanceDetailCell(section, student, dateKey) {
+  const record = section.records.find((item) =>
+    (item.studentId || item.studentName) === student.id
+    && attendanceDateValue(item) === dateKey
+  );
+  if (!record) return `<td class="attendance-record-cell"><span class="muted-mark">-</span></td>`;
+  const isPresent = record.status === "Present";
+  const isLate = record.status === "Late";
+  const statusMark = isPresent ? "&#10003;" : isLate ? "L" : "&#215;";
+  const statusClass = isPresent || isLate ? "present" : "absent";
+  return `
+    <td class="attendance-record-cell" title="${escapeAttribute(record.status || "")}">
+      <span class="attendance-status-mark ${statusClass}" role="img" aria-label="${escapeAttribute(`${student.displayName} ${dateKey} ${record.status || ""}`)}">${statusMark}</span>
+    </td>
   `;
 }
 
@@ -6241,7 +6345,7 @@ async function renderTeacherWorkloadModule() {
     <section class="table-card">
       <div class="section-header"><h2>Workload Overview</h2></div>
       <div class="filter-grid">
-        <label>Search<input id="workloadSearch" type="search" placeholder="Teacher, subject, section, duty" /></label>
+        <label>Search<input id="workloadSearch" type="search" placeholder="Teacher, subject, section, adviser, duty" /></label>
         <label>Department<select id="workloadDepartmentFilter"></select></label>
         <label>Grade Level<select id="workloadGradeFilter"></select></label>
         <label>Subject Area<select id="workloadSubjectFilter"></select></label>
@@ -6300,6 +6404,7 @@ function applyTeacherWorkloadFilters() {
       summary.workloadStatus,
       ...summary.subjects,
       ...summary.sections,
+      ...summary.advisoryClasses.map(classLabel),
       ...summary.subjectAreas,
       ...summary.duties.map((duty) => duty.dutyName),
     ].join(" ").toLowerCase();
@@ -6328,7 +6433,7 @@ function renderTeacherWorkloadAnalytics() {
     : 0;
   const mostOverloaded = summaries[0]?.teacherName || "None";
   const ancillaryCount = summaries.reduce((sum, summary) => sum + summary.duties.length, 0);
-  const totalTeachingLoad = summaries.reduce((sum, summary) => sum + summary.teachingHours, 0);
+  const totalTeachingLoad = summaries.reduce((sum, summary) => sum + summary.teachingHours + summary.advisoryScore, 0);
   const departmentRows = groupSumRows(summaries, (summary) => summary.department || summary.role || "Unassigned", (summary) => summary.workloadScore).slice(0, 8);
   const ancillaryRows = groupCountRows(summaries.flatMap((summary) => summary.duties), "dutyName").slice(0, 8);
   const overloadedTeacher = summaries.find((summary) => summary.workloadScore > average && ["Heavy Load", "Overloaded"].includes(summary.workloadStatus));
@@ -6336,7 +6441,7 @@ function renderTeacherWorkloadAnalytics() {
   host.innerHTML = `
     ${renderAttendanceKpiGrid([
       ["Total Teachers", String(summaries.length), "Within current filters"],
-      ["Total Teaching Load", `${totalTeachingLoad.toFixed(1)} hrs`, "Weekly class load"],
+      ["Total Teaching Load", `${totalTeachingLoad.toFixed(1)} hrs`, "Class load plus adviser load"],
       ["Average Load", average.toFixed(1), "Average workload score"],
       ["Most Loaded Teacher", mostOverloaded, "Highest workload score"],
       ["Ancillary Assignments", String(ancillaryCount), "Coordinator and adviser duties"],
@@ -6368,21 +6473,27 @@ function renderTeacherWorkloadTable(host) {
           <th>Teacher</th>
           <th>Subjects</th>
           <th>Sections / Classes</th>
+          <th>Adviser</th>
           <th>Teaching Load</th>
           <th>Ancillary Duties</th>
           <th>Workload</th>
-          <th>Actions</th>
         </tr>
       </thead>
       <tbody>
         ${filteredTeacherWorkloadSummaries.map((summary) => `
-          <tr>
+          <tr class="workload-summary-row" tabindex="0" role="button" data-teacher-id="${escapeHtml(summary.teacherId)}" aria-label="View workload profile for ${escapeAttribute(summary.teacherName)}">
             <td>
               <strong>${escapeHtml(summary.teacherName)}</strong>
               <small class="row-note">${escapeHtml(summary.department || summary.role || "Teacher")}</small>
             </td>
             <td>${summary.subjects.length ? summary.subjects.map((subject) => `<span class="workload-chip">${escapeHtml(subject)}</span>`).join("") : `<span class="muted-mark">-</span>`}</td>
             <td>${summary.sections.length ? summary.sections.map((section) => `<span class="workload-chip">${escapeHtml(section)}</span>`).join("") : `<span class="muted-mark">-</span>`}</td>
+            <td>
+              ${summary.advisoryClasses.length ? `
+                ${summary.advisoryClasses.map((section) => `<span class="workload-chip">${escapeHtml(classLabel(section))}</span>`).join("")}
+                <small class="row-note">${summary.advisoryScore.toFixed(1)} equivalent hours</small>
+              ` : `<span class="muted-mark">-</span>`}
+            </td>
             <td>
               <strong>${summary.teachingHours.toFixed(1)} hrs/week</strong>
               <small class="row-note">${summary.teachingAssignments.length} class loads, ${summary.preparations} preparations, ${summary.studentCount} students</small>
@@ -6395,7 +6506,6 @@ function renderTeacherWorkloadTable(host) {
               ${workloadStatusBadge(summary.workloadStatus)}
               <small class="row-note">${summary.workloadScore.toFixed(1)} total score</small>
             </td>
-            <td class="row-actions"><button class="secondary-button view-workload-profile" type="button" data-id="${escapeHtml(summary.teacherId)}">View</button></td>
           </tr>
         `).join("")}
       </tbody>
@@ -6417,7 +6527,7 @@ function renderTeacherWorkloadDetail(teacherId) {
     </div>
     <div class="attendance-kpi-grid workload-profile-kpis">
       <article class="attendance-kpi-card"><span>Total Score</span><strong>${summary.workloadScore.toFixed(1)}</strong><small>${escapeHtml(summary.workloadCategory)} category</small></article>
-      <article class="attendance-kpi-card"><span>Teaching Load</span><strong>${summary.teachingLoadScore.toFixed(1)}</strong><small>${summary.teachingHours.toFixed(1)} hrs/week</small></article>
+      <article class="attendance-kpi-card"><span>Teaching Load</span><strong>${summary.teachingLoadScore.toFixed(1)}</strong><small>${summary.teachingHours.toFixed(1)} class hrs + ${summary.advisoryScore.toFixed(1)} adviser hrs</small></article>
       <article class="attendance-kpi-card"><span>Ancillary Load</span><strong>${summary.ancillaryScore.toFixed(1)}</strong><small>${summary.duties.length} duties</small></article>
       <article class="attendance-kpi-card"><span>Students Handled</span><strong>${summary.studentCount}</strong><small>${summary.sections.length} sections/classes</small></article>
     </div>
@@ -6433,7 +6543,12 @@ function renderTeacherWorkloadDetail(teacherId) {
                 <td>${escapeHtml(record.sectionName || "Unassigned")}</td>
                 <td>${Number(record.weeklyHours || 0).toFixed(1)}</td>
                 <td>${Number(record.preparations || 0)}</td>
-                <td>${canManageTeacherWorkload() ? `<button class="secondary-button remove-teaching-load" type="button" data-id="${escapeHtml(record.id)}">Remove</button>` : ""}</td>
+                <td class="row-actions">
+                  ${canManageTeacherWorkload() ? `
+                    <button class="secondary-button edit-teaching-load" type="button" data-id="${escapeHtml(record.id)}">Edit</button>
+                    <button class="secondary-button remove-teaching-load" type="button" data-id="${escapeHtml(record.id)}">Remove</button>
+                  ` : ""}
+                </td>
               </tr>
             `).join("")}</tbody>
           </table>
@@ -6449,15 +6564,36 @@ function renderTeacherWorkloadDetail(teacherId) {
                 <td>${escapeHtml(record.dutyName || "")}<small class="row-note">${escapeHtml(record.description || "")}</small></td>
                 <td>${Number(record.equivalentHours || 0).toFixed(1)}</td>
                 <td>${escapeHtml(record.assignedByName || "")}</td>
-                <td>${canManageTeacherWorkload() ? `<button class="secondary-button remove-ancillary-duty" type="button" data-id="${escapeHtml(record.id)}">Remove</button>` : ""}</td>
+                <td class="row-actions">
+                  ${canManageTeacherWorkload() ? `
+                    <button class="secondary-button edit-ancillary-duty" type="button" data-id="${escapeHtml(record.id)}">Edit</button>
+                    <button class="secondary-button remove-ancillary-duty" type="button" data-id="${escapeHtml(record.id)}">Remove</button>
+                  ` : ""}
+                </td>
               </tr>
             `).join("")}</tbody>
           </table>
         ` : `<p class="empty-state">No ancillary assignments yet.</p>`}
       </article>
       <article>
+        <h3>Advisory Classes</h3>
+        ${summary.advisoryClasses.length ? `
+          <table class="compact-table">
+            <thead><tr><th>Class / Section</th><th>School Year</th><th>Hours</th><th></th></tr></thead>
+            <tbody>${summary.advisoryClasses.map((section) => `
+              <tr>
+                <td>${escapeHtml(classLabel(section))}</td>
+                <td>${escapeHtml(section.schoolYear || "")}</td>
+                <td>${WORKLOAD_RULES.advisoryClassHours.toFixed(1)}</td>
+                <td class="row-actions">${canManageClasses() ? `<button class="secondary-button edit-advisory-class" type="button" data-id="${escapeHtml(section.id)}">Edit Adviser</button>` : ""}</td>
+              </tr>
+            `).join("")}</tbody>
+          </table>
+        ` : `<p class="empty-state">No advisory class assigned.</p>`}
+      </article>
+      <article>
         <h3>Weekly Schedule Summary</h3>
-        <p>${escapeHtml(summary.teacherName)} currently has ${summary.teachingHours.toFixed(1)} weekly teaching hours, ${summary.preparations} preparations, ${summary.advisoryClasses.length} advisory class${summary.advisoryClasses.length === 1 ? "" : "es"}, and ${summary.duties.length} ancillary assignment${summary.duties.length === 1 ? "" : "s"}.</p>
+        <p>${escapeHtml(summary.teacherName)} currently has ${summary.teachingHours.toFixed(1)} weekly teaching hours, ${summary.preparations} preparations, ${summary.advisoryClasses.length} advisory class${summary.advisoryClasses.length === 1 ? "" : "es"} worth ${summary.advisoryScore.toFixed(1)} hours, and ${summary.duties.length} ancillary assignment${summary.duties.length === 1 ? "" : "s"}.</p>
       </article>
       <article>
         <h3>Balancing Suggestions</h3>
@@ -6467,39 +6603,39 @@ function renderTeacherWorkloadDetail(teacherId) {
   `;
 }
 
-function openTeachingLoadForm() {
+function openTeachingLoadForm(record = null) {
   const sectionOptions = classRecordsCache
     .filter((section) => section.status !== "archived")
-    .map((section) => `<option value="${escapeHtml(section.id)}">${escapeHtml(classLabel(section))}</option>`)
+    .map((section) => `<option value="${escapeHtml(section.id)}" ${section.id === record?.sectionId ? "selected" : ""}>${escapeHtml(classLabel(section))}</option>`)
     .join("");
-  const subjectOptions = getSubjectOptionsForWorkload("", "");
+  const subjectOptions = getSubjectOptionsForWorkload(record?.gradeLevel || "", record?.sectionId || "", record?.subjectId || "");
   els.dashboardContent.insertAdjacentHTML("beforeend", `
     <div id="academicModal" class="modal-backdrop">
-      <form id="teachingLoadForm" class="modal">
+      <form id="teachingLoadForm" class="modal" data-id="${escapeHtml(record?.id || "")}">
         <div class="modal-header">
-          <div><p class="eyebrow">Teacher Workload</p><h2>Add Teaching Load</h2></div>
+          <div><p class="eyebrow">Teacher Workload</p><h2>${record ? "Edit Teaching Load" : "Add Teaching Load"}</h2></div>
           <button class="icon-button close-academic-modal" type="button" aria-label="Close">x</button>
         </div>
         <div class="form-grid learner-form-grid">
-          <label>Teacher<select id="workloadTeacherId" required>${teacherOptions("", "Select teacher")}</select></label>
+          <label>Teacher<select id="workloadTeacherId" required>${teacherOptions(record?.teacherId || "", "Select teacher")}</select></label>
           <label>Section<select id="workloadSectionId"><option value="">No section</option>${sectionOptions}</select></label>
-          <label>Grade Level<select id="workloadGradeLevel" required>${optionList(gradeLevels, "", "Select grade")}</select></label>
+          <label>Grade Level<select id="workloadGradeLevel" required>${optionList(gradeLevels, record?.gradeLevel || "", "Select grade")}</select></label>
           <label>Subject<select id="workloadSubjectId" required>${subjectOptions}</select></label>
-          <label>Weekly Hours<input id="workloadWeeklyHours" type="number" min="0" step="0.5" placeholder="4" /></label>
-          <label>Preparations<input id="workloadPreparations" type="number" min="0" step="1" value="1" /></label>
-          <label class="form-field-wide">Description<textarea id="workloadDescription" rows="3"></textarea></label>
+          <label>Weekly Hours<input id="workloadWeeklyHours" type="number" min="0" step="0.5" value="${escapeHtml(record?.weeklyHours ?? "")}" placeholder="4" /></label>
+          <label>Preparations<input id="workloadPreparations" type="number" min="0" step="1" value="${escapeHtml(record?.preparations ?? 1)}" /></label>
+          <label class="form-field-wide">Description<textarea id="workloadDescription" rows="3">${escapeHtml(record?.description || "")}</textarea></label>
         </div>
         <div id="academicFormMessage" class="message hidden" role="status"></div>
         <div class="modal-actions">
           <button class="secondary-button close-academic-modal" type="button">Cancel</button>
-          <button class="primary-button" type="submit">Save Teaching Load</button>
+          <button class="primary-button" type="submit">${record ? "Save Changes" : "Save Teaching Load"}</button>
         </div>
       </form>
     </div>
   `);
 }
 
-function getSubjectOptionsForWorkload(gradeLevel = "", sectionId = "") {
+function getSubjectOptionsForWorkload(gradeLevel = "", sectionId = "", selectedSubjectId = "") {
   const activeSubjects = schoolSubjectRecordsCache.filter((record) => (record.status || "active") === "active");
   const filtered = activeSubjects.filter((record) =>
     (!gradeLevel || record.gradeLevel === gradeLevel)
@@ -6507,7 +6643,7 @@ function getSubjectOptionsForWorkload(gradeLevel = "", sectionId = "") {
   );
   const options = filtered
     .sort((a, b) => subjectLabel(a).localeCompare(subjectLabel(b)))
-    .map((record) => `<option value="${escapeHtml(record.id)}">${escapeHtml(subjectLabel(record))}</option>`)
+    .map((record) => `<option value="${escapeHtml(record.id)}" ${record.id === selectedSubjectId ? "selected" : ""}>${escapeHtml(subjectLabel(record))}</option>`)
     .join("");
   return `<option value="">${gradeLevel ? "Select subject" : "Select grade level first"}</option>${options}`;
 }
@@ -6521,24 +6657,24 @@ function syncTeachingLoadSubjectOptions() {
   if (subjectField) subjectField.innerHTML = getSubjectOptionsForWorkload(gradeLevel, section?.id || "");
 }
 
-function openAncillaryDutyForm() {
+function openAncillaryDutyForm(record = null) {
   els.dashboardContent.insertAdjacentHTML("beforeend", `
     <div id="academicModal" class="modal-backdrop">
-      <form id="ancillaryDutyForm" class="modal">
+      <form id="ancillaryDutyForm" class="modal" data-id="${escapeHtml(record?.id || "")}">
         <div class="modal-header">
-          <div><p class="eyebrow">Teacher Workload</p><h2>Add Ancillary Duty</h2></div>
+          <div><p class="eyebrow">Teacher Workload</p><h2>${record ? "Edit Ancillary Duty" : "Add Ancillary Duty"}</h2></div>
           <button class="icon-button close-academic-modal" type="button" aria-label="Close">x</button>
         </div>
         <div class="form-grid learner-form-grid">
-          <label>Teacher<select id="ancillaryTeacherId" required>${teacherOptions("", "Select teacher")}</select></label>
-          <label>Duty<select id="ancillaryDutyName" required>${optionList(ancillaryDutyOptions, "", "Select duty")}</select></label>
-          <label>Equivalent Hours / Points<input id="ancillaryEquivalentHours" type="number" min="0" step="0.5" value="2" required /></label>
-          <label class="form-field-wide">Description<textarea id="ancillaryDescription" rows="3"></textarea></label>
+          <label>Teacher<select id="ancillaryTeacherId" required>${teacherOptions(record?.teacherId || "", "Select teacher")}</select></label>
+          <label>Duty<select id="ancillaryDutyName" required>${optionList(ancillaryDutyOptions, record?.dutyName || "", "Select duty")}</select></label>
+          <label>Equivalent Hours / Points<input id="ancillaryEquivalentHours" type="number" min="0" step="0.5" value="${escapeHtml(record?.equivalentHours ?? 2)}" required /></label>
+          <label class="form-field-wide">Description<textarea id="ancillaryDescription" rows="3">${escapeHtml(record?.description || "")}</textarea></label>
         </div>
         <div id="academicFormMessage" class="message hidden" role="status"></div>
         <div class="modal-actions">
           <button class="secondary-button close-academic-modal" type="button">Cancel</button>
-          <button class="primary-button" type="submit">Save Duty</button>
+          <button class="primary-button" type="submit">${record ? "Save Changes" : "Save Duty"}</button>
         </div>
       </form>
     </div>
@@ -6548,6 +6684,8 @@ function openAncillaryDutyForm() {
 async function handleTeachingLoadFormSubmit(event) {
   event.preventDefault();
   const message = document.querySelector("#academicFormMessage");
+  const form = event.target;
+  const recordId = form.dataset.id || "";
   const teacher = academicTeachersCache.find((item) => item.id === document.querySelector("#workloadTeacherId").value);
   const section = getSelectedClass(document.querySelector("#workloadSectionId").value);
   const subject = schoolSubjectRecordsCache.find((item) => item.id === document.querySelector("#workloadSubjectId").value);
@@ -6571,12 +6709,18 @@ async function handleTeachingLoadFormSubmit(event) {
     assignedByName: currentUserProfile.fullName || auth.currentUser.email,
   };
   try {
-    const created = await addDoc(collection(db, "teacherWorkloads"), { ...data, createdAt: serverTimestamp(), updatedAt: serverTimestamp() });
-    await createAuditLog("create", "Teacher Workload", created.id, null, data);
+    if (recordId) {
+      const before = teacherWorkloadRecordsCache.find((record) => record.id === recordId);
+      await updateDoc(doc(db, "teacherWorkloads", recordId), { ...data, updatedAt: serverTimestamp() });
+      await createAuditLog("update", "Teacher Workload", recordId, before, data);
+    } else {
+      const created = await addDoc(collection(db, "teacherWorkloads"), { ...data, createdAt: serverTimestamp(), updatedAt: serverTimestamp() });
+      await createAuditLog("create", "Teacher Workload", created.id, null, data);
+    }
     document.querySelector("#academicModal")?.remove();
     await renderTeacherWorkloadModule();
     await refreshTeacherWorkloadCounters(currentUserProfile.role);
-    showDashboardMessage("Teaching load saved.");
+    showDashboardMessage(recordId ? "Teaching load updated." : "Teaching load saved.");
   } catch (error) {
     message.textContent = `Save failed: ${error.message}`;
     message.classList.add("error");
@@ -6587,6 +6731,8 @@ async function handleTeachingLoadFormSubmit(event) {
 async function handleAncillaryDutyFormSubmit(event) {
   event.preventDefault();
   const message = document.querySelector("#academicFormMessage");
+  const form = event.target;
+  const recordId = form.dataset.id || "";
   const teacher = academicTeachersCache.find((item) => item.id === document.querySelector("#ancillaryTeacherId").value);
   if (!teacher) return;
   const data = {
@@ -6600,12 +6746,18 @@ async function handleAncillaryDutyFormSubmit(event) {
     assignedByName: currentUserProfile.fullName || auth.currentUser.email,
   };
   try {
-    const created = await addDoc(collection(db, "ancillaryAssignments"), { ...data, createdAt: serverTimestamp(), updatedAt: serverTimestamp() });
-    await createAuditLog("create", "Teacher Workload", created.id, null, data);
+    if (recordId) {
+      const before = ancillaryAssignmentRecordsCache.find((record) => record.id === recordId);
+      await updateDoc(doc(db, "ancillaryAssignments", recordId), { ...data, updatedAt: serverTimestamp() });
+      await createAuditLog("update", "Teacher Workload", recordId, before, data);
+    } else {
+      const created = await addDoc(collection(db, "ancillaryAssignments"), { ...data, createdAt: serverTimestamp(), updatedAt: serverTimestamp() });
+      await createAuditLog("create", "Teacher Workload", created.id, null, data);
+    }
     document.querySelector("#academicModal")?.remove();
     await renderTeacherWorkloadModule();
     await refreshTeacherWorkloadCounters(currentUserProfile.role);
-    showDashboardMessage("Ancillary duty saved.");
+    showDashboardMessage(recordId ? "Ancillary duty updated." : "Ancillary duty saved.");
   } catch (error) {
     message.textContent = `Save failed: ${error.message}`;
     message.classList.add("error");
@@ -7536,34 +7688,64 @@ function applyAssessmentFilters() {
       || (mpsRange === "high" && group.mps >= 85)
     );
   filteredAssessmentRecords = filteredAssessmentGroups.flatMap((group) => group.records);
-  renderAssessmentComparisonCards(filteredAssessmentRecords);
+  const comparisonRows = buildAssessmentComparisonRows(filteredAssessmentGroups);
+  renderAssessmentComparisonCards(filteredAssessmentRecords, filteredAssessmentGroups);
   if (!filteredAssessmentGroups.length) {
     host.innerHTML = `<p class="empty-state">No assessment records match the current filters.</p>`;
     return;
   }
+  const terms = assessmentComparisonTerms(filteredAssessmentGroups);
+  const termHeaders = terms.map((item) => `
+    <th>${escapeHtml(item)} Diagnostic MPS</th>
+    <th>${escapeHtml(item)} Term Exam MPS</th>
+    <th>${escapeHtml(item)} Comparison</th>
+  `).join("");
   host.innerHTML = `
-    <table class="academic-table">
-      <thead><tr><th>School Year</th><th>Quarter / Term</th><th>Grade Level</th><th>Section</th><th>Subject</th><th>Subject Teacher</th><th>Assessment Type</th><th>Assessment Title</th><th>MPS</th><th>Date Administered</th><th>Actions</th></tr></thead>
-      <tbody>${filteredAssessmentGroups.map((group) => `
-        <tr>
-          <td>${escapeHtml(group.schoolYear || "Not recorded")}</td>
-          <td>${escapeHtml(group.term || "Not recorded")}</td>
-          <td>${escapeHtml(group.gradeLevel || "Not recorded")}</td>
-          <td>${escapeHtml(group.sectionName || "No section")}</td>
-          <td><strong>${escapeHtml(group.subjectName)}</strong><small class="row-note">${escapeHtml(group.subjectCategory || "No category")}</small></td>
-          <td>${escapeHtml(group.teacherName)}</td>
-          <td>${escapeHtml(group.assessmentType)}</td>
-          <td>${escapeHtml(group.assessmentTitle || "Untitled assessment")}<small class="row-note">${group.isLegacy ? "Legacy section-based record" : `${group.numberOfLearners} learners`}</small></td>
-          <td><strong>${group.mps.toFixed(1)}%</strong><small class="row-note">${escapeHtml(group.proficiencyLevel)}</small></td>
-          <td>${escapeHtml(group.dateAdministered || "Not recorded")}</td>
-          <td class="row-actions">${canEditAssessmentRecord(group.records[0]) ? `<button class="secondary-button edit-assessment" type="button" data-id="${escapeHtml(group.records[0].id)}">Edit</button>` : ""}</td>
+    <table class="academic-table assessment-record-table">
+      <thead><tr><th>Subject-Grade-Class</th><th>Subject Teacher</th>${termHeaders}<th>Learners</th></tr></thead>
+      <tbody>${comparisonRows.map((row, index) => `
+        <tr class="assessment-group-row" data-target="assessmentGroupDetails${index}" tabindex="0">
+          <td><strong>${escapeHtml(assessmentGroupClassLabel(row))}</strong><small class="row-note">${escapeHtml(row.schoolYear || "No school year")}</small></td>
+          <td>${escapeHtml(row.teacherName)}</td>
+          ${terms.map((termName) => {
+            const termData = row.terms.get(termName) || {};
+            return `
+              <td>${renderAssessmentMpsCell(termData.diagnostic)}</td>
+              <td>${renderAssessmentMpsCell(termData.exam)}</td>
+              <td>${renderAssessmentComparisonCell(termData)}</td>
+            `;
+          }).join("")}
+          <td>${row.numberOfLearners}</td>
+        </tr>
+        <tr id="assessmentGroupDetails${index}" class="assessment-group-details hidden">
+          <td colspan="${terms.length * 3 + 3}">
+            <div class="assessment-student-score-panel">
+              <div class="section-header">
+                <h3>${escapeHtml(assessmentGroupClassLabel(row))}</h3>
+              </div>
+              <div class="table-wrap">
+                <table class="batch-table">
+                  <thead><tr><th>Term</th><th>Assessment</th><th>MPS</th><th>Mean Score</th><th>Highest</th><th>Lowest</th><th>Learners</th><th></th></tr></thead>
+                  <tbody>${renderAssessmentComparisonDetails(row, terms)}</tbody>
+                </table>
+              </div>
+            </div>
+          </td>
         </tr>`).join("")}</tbody>
     </table>
   `;
 }
 
 function assessmentTypeOptions() {
-  return ["Diagnostic Test", "Quarterly Exam", "Long Test", "Post Test", "Other"];
+  return ["Diagnostic Test", "Term Exam"];
+}
+
+function assessmentTypeFromScoreType(scoreType = "") {
+  return scoreType === "post" ? "Term Exam" : "Diagnostic Test";
+}
+
+function assessmentScoreTypeFromType(assessmentType = "") {
+  return assessmentType === "Term Exam" || assessmentType === "Quarterly Exam" || assessmentType === "Post Test" || assessmentType === "Long Test" ? "post" : "pre";
 }
 
 function assessmentSubjectName(record = {}) {
@@ -7575,8 +7757,9 @@ function assessmentTeacherName(record = {}) {
 }
 
 function assessmentDisplayType(record = {}) {
-  if (record.assessmentType) return record.assessmentType;
-  if (getAssessmentHighScore(record, "post") > 0) return "Quarterly Exam";
+  if (record.assessmentType === "Diagnostic Test") return "Diagnostic Test";
+  if (record.assessmentType) return "Term Exam";
+  if (getAssessmentHighScore(record, "post") > 0) return "Term Exam";
   return "Diagnostic Test";
 }
 
@@ -7644,36 +7827,145 @@ function buildAssessmentGroups(records = []) {
   }).sort((a, b) => (b.dateAdministered || "").localeCompare(a.dateAdministered || "") || a.subjectName.localeCompare(b.subjectName));
 }
 
-function renderAssessmentComparisonCards(records = []) {
+function assessmentComparisonTerms(groups = []) {
+  const order = new Map(termOptions.map((term, index) => [term, index]));
+  return [...new Set(groups.map((group) => group.term || "Not recorded"))]
+    .sort((a, b) => (order.get(a) ?? 99) - (order.get(b) ?? 99) || String(a).localeCompare(String(b)));
+}
+
+function assessmentComparisonBaseKey(group = {}) {
+  return [
+    group.schoolYear || "",
+    group.gradeLevel || "",
+    group.sectionName || "",
+    group.subjectName || "",
+    group.teacherName || "",
+  ].join("|");
+}
+
+function buildAssessmentComparisonRows(groups = []) {
+  const rows = new Map();
+  groups.forEach((group) => {
+    const key = assessmentComparisonBaseKey(group);
+    if (!rows.has(key)) {
+      rows.set(key, {
+        schoolYear: group.schoolYear || "",
+        gradeLevel: group.gradeLevel || "",
+        sectionName: group.sectionName || "",
+        subjectName: group.subjectName || "",
+        teacherName: group.teacherName || "",
+        numberOfLearners: 0,
+        terms: new Map(),
+      });
+    }
+    const row = rows.get(key);
+    row.numberOfLearners = Math.max(row.numberOfLearners, Number(group.numberOfLearners || 0));
+    const term = group.term || "Not recorded";
+    if (!row.terms.has(term)) row.terms.set(term, {});
+    const termData = row.terms.get(term);
+    if (group.assessmentType === "Diagnostic Test") {
+      termData.diagnostic = group;
+    } else {
+      termData.exam = group;
+    }
+  });
+  return [...rows.values()].sort((a, b) =>
+    a.subjectName.localeCompare(b.subjectName)
+    || a.gradeLevel.localeCompare(b.gradeLevel)
+    || a.sectionName.localeCompare(b.sectionName)
+  );
+}
+
+function renderAssessmentMpsCell(group) {
+  if (!group) return `<span class="muted-mark">-</span>`;
+  return `<strong>${Number(group.mps || 0).toFixed(1)}%</strong><small class="row-note">${escapeHtml(group.proficiencyLevel || assessmentProficiencyLevel(group.mps || 0))}</small>`;
+}
+
+function formatAssessmentMpsDifference(termData = {}) {
+  if (!termData.diagnostic || !termData.exam) return "Incomplete";
+  const difference = Number(termData.exam.mps || 0) - Number(termData.diagnostic.mps || 0);
+  return `${difference >= 0 ? "+" : ""}${difference.toFixed(1)} pp`;
+}
+
+function renderAssessmentComparisonCell(termData = {}) {
+  if (!termData.diagnostic || !termData.exam) return `<span class="muted-mark">Incomplete</span>`;
+  const difference = Number(termData.exam.mps || 0) - Number(termData.diagnostic.mps || 0);
+  const className = difference >= 0 ? "positive" : "negative";
+  return `<strong class="${className}">${formatAssessmentMpsDifference(termData)}</strong><small class="row-note">Exam vs diagnostic</small>`;
+}
+
+function renderAssessmentComparisonDetails(row, terms = []) {
+  const detailRows = [];
+  terms.forEach((term) => {
+    const termData = row.terms.get(term) || {};
+    [
+      ["Diagnostic Test", termData.diagnostic],
+      ["Term Exam", termData.exam],
+    ].forEach(([label, group]) => {
+      if (!group) return;
+      detailRows.push(`
+        <tr>
+          <td>${escapeHtml(term)}</td>
+          <td>${escapeHtml(label)}</td>
+          <td><strong>${Number(group.mps || 0).toFixed(1)}%</strong></td>
+          <td>${Number(group.meanScore || 0).toFixed(2)} / ${Number(group.totalItems || 0).toFixed(2)}</td>
+          <td>${Number(group.highestScore || 0).toFixed(2)}</td>
+          <td>${Number(group.lowestScore || 0).toFixed(2)}</td>
+          <td>${Number(group.numberOfLearners || 0)}</td>
+          <td class="row-actions">${canEditAssessmentRecord(group.records[0]) ? `<button class="secondary-button edit-assessment" type="button" data-id="${escapeHtml(group.records[0].id)}">Edit Scores</button>` : ""}</td>
+        </tr>
+      `);
+    });
+  });
+  return detailRows.join("") || `<tr><td colspan="8"><p class="empty-state">No detailed scores available.</p></td></tr>`;
+}
+
+function assessmentGroupClassLabel(group = {}) {
+  return `${group.subjectName || "Subject"} - ${group.gradeLevel || "Grade"} - ${assessmentSectionOnlyLabel(group.sectionName)}`;
+}
+
+function assessmentPerformanceRows(groups = [], getter) {
+  const buckets = new Map();
+  groups
+    .filter((group) => group.assessmentType === "Term Exam" || !groups.some((item) => item.assessmentType === "Term Exam" && assessmentComparisonBaseKey(item) === assessmentComparisonBaseKey(group) && item.term === group.term))
+    .forEach((group) => {
+      const label = String(getter(group) || "Not recorded").trim() || "Not recorded";
+      if (!buckets.has(label)) buckets.set(label, []);
+      buckets.get(label).push(Number(group.mps || 0));
+    });
+  return [...buckets.entries()]
+    .map(([label, values]) => [label, Number((values.reduce((sum, value) => sum + value, 0) / values.length).toFixed(1))])
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+}
+
+function renderAssessmentComparisonCards(records = [], groups = buildAssessmentGroups(records)) {
   const host = document.querySelector("#assessmentComparisonCards");
   if (!host) return;
   const stats = computeAssessmentStats(records, [], studentRecordsCache, classRecordsCache);
-  const comparedCount = countComparableAssessments(records);
-  const mpsByGroup = (getter) => groupCountRows(records, getter).map(([label]) => {
-    const grouped = records.filter((record) => (getter(record) || "Not recorded") === label);
-    const groupStats = computeAssessmentStats(grouped, [], [], []);
-    return [label, Number(groupStats.postMps.toFixed(1))];
-  });
-  const subjectRows = mpsByGroup((record) => record.subjectName || record.sectionName || record.gradeLevel).sort((a, b) => b[1] - a[1]).slice(0, 8);
-  const sectionRows = mpsByGroup((record) => record.sectionName || record.sectionId).sort((a, b) => b[1] - a[1]).slice(0, 8);
-  const gradeRows = mpsByGroup((record) => record.gradeLevel || "No grade").sort((a, b) => b[1] - a[1]).slice(0, 8);
-  const teacherRows = mpsByGroup((record) => assessmentTeacherName(record)).sort((a, b) => b[1] - a[1]).slice(0, 8);
-  const termRows = groupCountRows(records, "term").map(([term]) => {
-    const grouped = records.filter((record) => record.term === term);
-    return [term, Number(computeAssessmentStats(grouped, [], [], []).postMps.toFixed(1))];
-  }).sort((a, b) => String(a[0]).localeCompare(String(b[0])));
-  const strandRows = mpsByGroup((record) => record.strand || record.sectionName || record.gradeLevel).sort((a, b) => b[1] - a[1]).slice(0, 8);
+  const comparedCount = buildAssessmentComparisonRows(groups).reduce((sum, row) =>
+    sum + [...row.terms.values()].filter((termData) => termData.diagnostic && termData.exam).length, 0);
+  const subjectRows = assessmentPerformanceRows(groups, (group) => group.subjectName).slice(0, 8);
+  const sectionRows = assessmentPerformanceRows(groups, (group) => group.sectionName).slice(0, 8);
+  const gradeRows = assessmentPerformanceRows(groups, (group) => group.gradeLevel).slice(0, 8);
+  const teacherRows = assessmentPerformanceRows(groups, (group) => group.teacherName).slice(0, 8);
+  const termRows = assessmentPerformanceRows(groups, (group) => group.term)
+    .sort((a, b) => {
+      const termOrder = new Map(termOptions.map((term, index) => [term, index]));
+      return (termOrder.get(a[0]) ?? 99) - (termOrder.get(b[0]) ?? 99) || String(a[0]).localeCompare(String(b[0]));
+    });
+  const subjectLowRows = [...subjectRows].sort((a, b) => a[1] - b[1]).slice(0, 8);
+  const gradeLowRows = [...gradeRows].sort((a, b) => a[1] - b[1]).slice(0, 8);
   const highest = subjectRows[0] || ["None", 0];
-  const lowest = [...subjectRows].reverse()[0] || ["None", 0];
-  const bestStrand = strandRows[0] || ["None", 0];
-  const lowStrand = [...strandRows].reverse()[0] || ["None", 0];
+  const lowest = subjectLowRows[0] || ["None", 0];
+  const bestGrade = gradeRows[0] || ["None", 0];
+  const lowGrade = gradeLowRows[0] || ["None", 0];
   host.innerHTML = `
     ${renderAttendanceKpiGrid([
       ["School-wide Average MPS", `${stats.postMps.toFixed(1)}%`, "Term exam MPS"],
-      ["Highest MPS Subject", highest[0], `${highest[1]}% MPS`],
-      ["Lowest MPS Subject", lowest[0], `${lowest[1]}% MPS`],
-      ["Best Performing Strand", bestStrand[0], `${bestStrand[1]}% MPS`],
-      ["Lowest Performing Strand", lowStrand[0], `${lowStrand[1]}% MPS`],
+      ["Best Performing Subject", highest[0], `${highest[1]}% MPS`],
+      ["Lowest Performing Subject", lowest[0], `${lowest[1]}% MPS`],
+      ["Best Performing Grade", bestGrade[0], `${bestGrade[1]}% MPS`],
+      ["Lowest Performing Grade", lowGrade[0], `${lowGrade[1]}% MPS`],
     ])}
     <div class="chart-grid attendance-chart-grid">
       ${renderSummaryChart("MPS by Subject", subjectRows)}
@@ -7681,13 +7973,13 @@ function renderAssessmentComparisonCards(records = []) {
       ${renderSummaryChart("MPS by Grade Level", gradeRows)}
       ${renderVerticalBarChart("Quarterly MPS Trend", termRows)}
       ${renderSummaryChart("MPS by Subject Teacher", teacherRows)}
-      ${renderSummaryChart("Lowest Performing Subjects", [...subjectRows].sort((a, b) => a[1] - b[1]).slice(0, 8))}
-      ${renderSummaryChart("Subject Trend Comparison", subjectRows)}
+      ${renderSummaryChart("Lowest Performing Subjects", subjectLowRows)}
+      ${renderSummaryChart("Lowest Performing Grades", gradeLowRows)}
       ${renderInsightPanel("MPS Insights", [
         termRows.length >= 2 && termRows.at(-1)[1] < termRows.at(-2)[1] ? `MPS decreased by ${(termRows.at(-2)[1] - termRows.at(-1)[1]).toFixed(1)}% from the previous term.` : "",
-        bestStrand[0] !== "None" ? `${bestStrand[0]} has the highest average MPS.` : "",
+        bestGrade[0] !== "None" ? `${bestGrade[0]} has the highest average MPS by grade.` : "",
         lowest[0] !== "None" ? `${lowest[0]} needs instructional follow-up.` : "",
-        comparedCount ? `${comparedCount} learners have comparable diagnostic and term exam scores.` : "",
+        comparedCount ? `${comparedCount} subject-section term pairs have both diagnostic and term exam MPS.` : "",
       ])}
     </div>
   `;
@@ -7695,16 +7987,14 @@ function renderAssessmentComparisonCards(records = []) {
 
 function openAssessmentForm(record = null) {
   editingAssessmentId = record?.id || null;
-  const editableClasses = getAssessmentEditableClasses();
-  const sectionOptions = editableClasses.map((section) => `<option value="${escapeHtml(section.id)}" ${section.id === record?.sectionId ? "selected" : ""}>${escapeHtml(classLabel(section))}</option>`).join("");
-  const selectedScoreType = record ? (getAssessmentHighScore(record, "post") > 0 ? "post" : "pre") : "";
+  const editableWorkloads = getAssessmentEditableWorkloads();
+  const selectedWorkload = record ? findAssessmentEditableWorkload(record, editableWorkloads) : null;
+  const selectedScoreType = record ? assessmentScoreTypeFromType(assessmentDisplayType(record)) : "";
   const scoreTypeOptions = assessmentScoreTypes
     .map((type) => `<option value="${escapeHtml(type.value)}" ${type.value === selectedScoreType ? "selected" : ""}>${escapeHtml(type.label)}</option>`)
     .join("");
-  const selectedSection = record?.sectionId || "";
-  const subjectOptions = assessmentSubjectOptions(selectedSection, record?.subjectId || "");
-  const teacherOptionsMarkup = assessmentSubjectTeacherOptions(record?.teacherUid || auth.currentUser?.uid || "");
-  const assessmentType = record ? assessmentDisplayType(record) : "";
+  const hasWorkloads = editableWorkloads.length > 0;
+  const noWorkloadMessage = assessmentWorkloadEmptyMessage();
   els.dashboardContent.insertAdjacentHTML("beforeend", `
     <div id="academicModal" class="modal-backdrop">
       <form id="assessmentForm" class="modal wide-modal">
@@ -7713,44 +8003,158 @@ function openAssessmentForm(record = null) {
           <button class="icon-button close-academic-modal" type="button" aria-label="Close">x</button>
         </div>
         <div class="form-grid learner-form-grid">
-          <label>School Year<input id="assessmentSchoolYear" value="${escapeHtml(record?.schoolYear || "")}" placeholder="Auto from section" readonly /></label>
-          <label>Section<select id="assessmentSectionId" required><option value="">Select section</option>${sectionOptions}</select></label>
-          <label>Grade Level<input id="assessmentGradeLevel" value="${escapeHtml(record?.gradeLevel || "")}" placeholder="Auto from section" readonly /></label>
           <label>Term<select id="assessmentTerm" required>${optionList([...new Set(assessmentScopeOptions.filter((item) => activeAssessmentScopes().includes(item.key)).map((item) => item.term))], record?.term || "", "Select term")}</select></label>
-          <label>Subject<select id="assessmentSubjectId" required>${subjectOptions}</select></label>
-          <label>Subject Teacher<select id="assessmentTeacherUid" required>${teacherOptionsMarkup}</select></label>
-          <label>Assessment Type<select id="assessmentType" required>${optionList(assessmentTypeOptions(), assessmentType, "Select assessment type")}</select></label>
-          <label>Assessment Title<input id="assessmentTitle" value="${escapeHtml(record?.assessmentTitle || "")}" placeholder="e.g. General Mathematics Diagnostic Test" /></label>
-          <label>Date Administered<input id="assessmentDateAdministered" type="date" value="${escapeHtml(record?.dateAdministered || todayIso())}" /></label>
-          <label>Score to Encode<select id="assessmentScoreType" required><option value="">Select score type</option>${scoreTypeOptions}</select></label>
+          <label>Type<select id="assessmentScoreType" required><option value="">Select type</option>${scoreTypeOptions}</select></label>
           <label>Total Items<input id="assessmentDefaultHighest" type="number" min="1" step="0.01" value="${escapeHtml(record ? getAssessmentHighScore(record, record.postTestScore ? "post" : "pre") : "")}" placeholder="Apply to all" /></label>
           <div class="batch-actions">
             <button id="applyHighestToAll" class="secondary-button" type="button">Apply Highest to All</button>
           </div>
         </div>
-        <label class="modal-field">Remarks<textarea id="assessmentRemarks" rows="3">${escapeHtml(record?.remarks || "")}</textarea></label>
-        <div id="assessmentBatchHost" class="batch-table-host"><p class="empty-state">Select a section, term, and score type to show students.</p></div>
+        <input id="assessmentWorkloadId" type="hidden" value="${escapeAttribute(selectedWorkload?.id || "")}" />
+        <div class="assessment-workload-picker" id="assessmentWorkloadPicker">
+          ${hasWorkloads ? renderAssessmentWorkloadCards(editableWorkloads, selectedWorkload?.id || "") : `<p class="empty-state">${escapeHtml(noWorkloadMessage)}</p>`}
+        </div>
+        <div id="assessmentBatchHost" class="batch-table-host"><p class="empty-state">${hasWorkloads ? "Select a subject-grade-class card to show students." : escapeHtml(noWorkloadMessage)}</p></div>
         <div id="academicFormMessage" class="message hidden" role="status"></div>
         <div class="modal-actions">
           <button class="secondary-button close-academic-modal" type="button">Cancel</button>
-          <button class="primary-button" type="submit">Save Class Scores</button>
+          <button class="primary-button" type="submit" ${hasWorkloads ? "" : "disabled"}>Save Class Scores</button>
         </div>
       </form>
     </div>
   `);
-  syncAssessmentSectionFields();
   renderAssessmentBatchRows();
 }
 
-function getAssessmentEditableClasses() {
-  if (currentUserProfile?.role !== "Teacher" || canViewAllAcademic()) return classRecordsCache.filter((section) => section.status !== "archived");
-  const teacherSectionIds = new Set(teacherWorkloadRecordsCache
-    .filter((record) => record.teacherId === auth.currentUser.uid && record.sectionId)
-    .map((record) => record.sectionId));
-  return classRecordsCache.filter((section) =>
-    section.status !== "archived"
-    && (section.adviserId === auth.currentUser.uid || teacherSectionIds.has(section.id))
+function assessmentWorkloadEmptyMessage() {
+  if (currentUserProfile?.role === "Teacher") {
+    const advisoryClasses = classRecordsCache.filter((section) =>
+      section.adviserId === auth.currentUser.uid
+      && (section.status || "active") !== "archived"
+    );
+    if (!advisoryClasses.length) {
+      return "No advisory class or assigned teaching load is available for score encoding.";
+    }
+    const hasMappedSubject = advisoryClasses.some((section) =>
+      schoolSubjectRecordsCache.some((subject) =>
+        (subject.status || "active") !== "archived"
+        && (!subject.gradeLevel || subject.gradeLevel === section.gradeLevel)
+        && (!subject.sectionId || subject.sectionId === section.id)
+      )
+    );
+    if (!hasMappedSubject) {
+      return "No subjects are mapped to your advisory grade or section yet. Ask the Principal to add subjects in School Setup.";
+    }
+  }
+  return "No subject-grade-section classes are available for score encoding.";
+}
+
+function renderAssessmentWorkloadCards(workloads = [], selectedId = "") {
+  return `
+    <div class="assessment-workload-card-grid">
+      ${workloads.map((workload) => {
+        const section = getSelectedClass(workload.sectionId);
+        const grade = workload.gradeLevel || section?.gradeLevel || "Grade";
+        const sectionName = assessmentSectionOnlyLabel(workload.sectionName || section?.sectionName || "Class");
+        const activeStudents = sectionActiveStudents(workload.sectionId).length;
+        const selected = workload.id === selectedId;
+        return `
+          <button class="assessment-workload-card ${selected ? "is-selected" : ""}" type="button" data-workload-id="${escapeAttribute(workload.id)}" aria-pressed="${selected ? "true" : "false"}">
+            <strong>${escapeHtml(workload.subjectName || "Subject")}</strong>
+            <span>${escapeHtml(`${grade} - ${sectionName}`)}</span>
+            <small>${escapeHtml(workload.teacherName || currentUserProfile?.fullName || "Subject Teacher")}</small>
+            <em>${activeStudents} learner${activeStudents === 1 ? "" : "s"}</em>
+          </button>
+        `;
+      }).join("")}
+    </div>
+  `;
+}
+
+function normalizeAssessmentMatchValue(value = "") {
+  return String(value || "").trim().toLowerCase();
+}
+
+function findAssessmentEditableWorkload(record = {}, workloads = getAssessmentEditableWorkloads()) {
+  if (!record || !workloads.length) return null;
+  const exact = workloads.find((workload) => workload.id === record.workloadId);
+  if (exact) return exact;
+  const recordSection = normalizeAssessmentMatchValue(record.sectionName);
+  const recordSectionOnly = normalizeAssessmentMatchValue(assessmentSectionOnlyLabel(record.sectionName));
+  const recordSubject = normalizeAssessmentMatchValue(assessmentSubjectName(record));
+  const recordTeacher = normalizeAssessmentMatchValue(record.teacherUid || record.teacherId);
+  const scored = workloads.map((workload) => {
+    const section = getSelectedClass(workload.sectionId);
+    const workloadSection = normalizeAssessmentMatchValue(workload.sectionName || classLabel(section || {}));
+    const workloadSectionOnly = normalizeAssessmentMatchValue(assessmentSectionOnlyLabel(workload.sectionName || section?.sectionName || ""));
+    const workloadSubject = normalizeAssessmentMatchValue(workload.subjectName);
+    let score = 0;
+    if (record.sectionId && workload.sectionId === record.sectionId) score += 50;
+    if (recordSection && [workloadSection, workloadSectionOnly].includes(recordSection)) score += 35;
+    if (recordSectionOnly && [workloadSection, workloadSectionOnly].includes(recordSectionOnly)) score += 35;
+    if (record.subjectId && workload.subjectId === record.subjectId) score += 30;
+    if (recordSubject && workloadSubject === recordSubject) score += 25;
+    if (recordTeacher && workload.teacherId === recordTeacher) score += 15;
+    if (record.gradeLevel && (workload.gradeLevel || section?.gradeLevel) === record.gradeLevel) score += 10;
+    return { workload, score };
+  }).sort((a, b) => b.score - a.score);
+  return scored[0]?.score > 0 ? scored[0].workload : null;
+}
+
+function getAssessmentEditableWorkloads() {
+  const assignedWorkloads = teacherWorkloadRecordsCache
+    .filter((workload) =>
+      workload.sectionId
+      && (canViewAllAcademic() || workload.teacherId === auth.currentUser.uid)
+      && getSelectedClass(workload.sectionId)?.status !== "archived"
+    );
+  const workloads = [...assignedWorkloads, ...buildAssessmentFallbackWorkloads(assignedWorkloads)];
+  return workloads
+    .sort((a, b) => assessmentWorkloadLabel(a).localeCompare(assessmentWorkloadLabel(b)));
+}
+
+function buildAssessmentFallbackWorkloads(existingWorkloads = []) {
+  if (currentUserProfile?.role !== "Teacher") return [];
+  const advisoryClasses = classRecordsCache.filter((section) =>
+    section.adviserId === auth.currentUser.uid
+    && (section.status || "active") !== "archived"
   );
+  const existingKeys = new Set(existingWorkloads.map((workload) =>
+    `${workload.sectionId || ""}:${workload.subjectId || normalizeAssessmentMatchValue(workload.subjectName)}`
+  ));
+  return advisoryClasses.flatMap((section) => {
+    const subjects = schoolSubjectRecordsCache.filter((subject) =>
+      (subject.status || "active") !== "archived"
+      && (!subject.gradeLevel || subject.gradeLevel === section.gradeLevel)
+      && (!subject.sectionId || subject.sectionId === section.id)
+    );
+    return subjects.map((subject) => ({
+      id: `fallback:${section.id}:${subject.id || normalizeAssessmentMatchValue(subject.subjectName)}`,
+      isFallbackWorkload: true,
+      teacherId: auth.currentUser.uid,
+      teacherName: currentUserProfile.fullName || auth.currentUser.email,
+      subjectId: subject.id || "",
+      subjectName: subject.subjectName || "Subject",
+      subjectArea: subject.subjectArea || "",
+      sectionId: section.id,
+      sectionName: classLabel(section),
+      gradeLevel: section.gradeLevel || "",
+      schoolYear: section.schoolYear || "",
+    })).filter((workload) =>
+      !existingKeys.has(`${workload.sectionId}:${workload.subjectId || normalizeAssessmentMatchValue(workload.subjectName)}`)
+    );
+  });
+}
+
+function assessmentWorkloadLabel(workload = {}) {
+  const section = getSelectedClass(workload.sectionId);
+  const grade = workload.gradeLevel || section?.gradeLevel || "Grade";
+  const sectionName = assessmentSectionOnlyLabel(workload.sectionName || section?.sectionName || "Class");
+  return `${workload.subjectName || "Subject"} - ${grade} - ${sectionName}`;
+}
+
+function assessmentSectionOnlyLabel(sectionName = "") {
+  return String(sectionName || "Class").replace(/^Grade\s+\d+\s*-\s*/i, "");
 }
 
 function assessmentSubjectOptions(sectionId = "", selected = "") {
@@ -7781,43 +8185,8 @@ function assessmentSubjectTeacherOptions(selected = "") {
 }
 
 function selectedAssessmentWorkload() {
-  const sectionId = document.querySelector("#assessmentSectionId")?.value || "";
-  const subjectId = document.querySelector("#assessmentSubjectId")?.value || "";
-  const teacherUid = document.querySelector("#assessmentTeacherUid")?.value || "";
-  return teacherWorkloadRecordsCache.find((record) =>
-    record.sectionId === sectionId
-    && (record.subjectId === subjectId || `${record.subjectName}:${record.teacherId}` === subjectId)
-    && (!teacherUid || record.teacherId === teacherUid)
-  ) || teacherWorkloadRecordsCache.find((record) =>
-    record.sectionId === sectionId
-    && (record.subjectId === subjectId || `${record.subjectName}:${record.teacherId}` === subjectId)
-  ) || null;
-}
-
-function syncAssessmentSectionFields() {
-  const section = getSelectedClass(document.querySelector("#assessmentSectionId")?.value || "");
-  document.querySelector("#assessmentSchoolYear").value = section?.schoolYear || "";
-  document.querySelector("#assessmentGradeLevel").value = section?.gradeLevel || "";
-  const subjectSelect = document.querySelector("#assessmentSubjectId");
-  if (subjectSelect) {
-    const current = subjectSelect.value;
-    subjectSelect.innerHTML = assessmentSubjectOptions(section?.id || "", current);
-  }
-}
-
-function syncAssessmentTeacherFromSubject() {
-  const workload = selectedAssessmentWorkload();
-  if (workload?.teacherId) {
-    document.querySelector("#assessmentTeacherUid").value = workload.teacherId;
-  }
-}
-
-function syncAssessmentScoreTypeFromType() {
-  const assessmentType = document.querySelector("#assessmentType")?.value || "";
-  const scoreType = document.querySelector("#assessmentScoreType");
-  if (!scoreType || scoreType.value) return;
-  if (assessmentType === "Diagnostic Test") scoreType.value = "pre";
-  if (["Quarterly Exam", "Post Test", "Long Test"].includes(assessmentType)) scoreType.value = "post";
+  const workloadId = document.querySelector("#assessmentWorkloadId")?.value || "";
+  return getAssessmentEditableWorkloads().find((record) => record.id === workloadId) || null;
 }
 
 function canEditAssessmentSelection(sectionId, teacherUid) {
@@ -7829,7 +8198,7 @@ function canEditAssessmentSelection(sectionId, teacherUid) {
   return canEditSectionRecords(sectionId);
 }
 
-function findAssessmentRecord(sectionId, studentId, term, subjectId = "", assessmentType = "", assessmentTitle = "", dateAdministered = "") {
+function findAssessmentRecord(sectionId, studentId, term, subjectId = "", assessmentType = "", assessmentTitle = "", dateAdministered = "", workloadId = "") {
   const editingRecord = editingAssessmentId ? assessmentRecordsCache.find((record) => record.id === editingAssessmentId) : null;
   if (editingRecord?.assessmentBatchId) {
     const batchMatch = assessmentRecordsCache.find((record) =>
@@ -7846,6 +8215,15 @@ function findAssessmentRecord(sectionId, studentId, term, subjectId = "", assess
     );
     if (legacyMatch) return legacyMatch;
   }
+  if (workloadId) {
+    const workloadMatch = assessmentRecordsCache.find((record) =>
+      record.workloadId === workloadId
+      && record.studentId === studentId
+      && record.term === term
+      && assessmentDisplayType(record) === assessmentType
+    );
+    if (workloadMatch) return workloadMatch;
+  }
   return assessmentRecordsCache.find((record) =>
     record.sectionId === sectionId
     && record.studentId === studentId
@@ -7858,19 +8236,20 @@ function findAssessmentRecord(sectionId, studentId, term, subjectId = "", assess
 }
 
 function renderAssessmentBatchRows() {
-  const sectionId = document.querySelector("#assessmentSectionId")?.value || "";
   const term = document.querySelector("#assessmentTerm")?.value || "";
   const scoreType = document.querySelector("#assessmentScoreType")?.value || "";
-  const subjectId = document.querySelector("#assessmentSubjectId")?.value || "";
-  const assessmentType = document.querySelector("#assessmentType")?.value || "";
-  const assessmentTitle = document.querySelector("#assessmentTitle")?.value.trim() || "";
-  const dateAdministered = document.querySelector("#assessmentDateAdministered")?.value || "";
+  const workload = selectedAssessmentWorkload();
+  const sectionId = workload?.sectionId || "";
+  const subjectId = workload?.subjectId || "";
+  const assessmentType = assessmentTypeFromScoreType(scoreType);
+  const assessmentTitle = "";
+  const dateAdministered = "";
   const isPostTest = scoreType === "post";
   const host = document.querySelector("#assessmentBatchHost");
   if (!host) return;
   const students = sectionActiveStudents(sectionId);
-  if (!sectionId || !term || !subjectId || !assessmentType || !scoreType) {
-    host.innerHTML = `<p class="empty-state">Select a section, term, subject, assessment type, and score type to show students.</p>`;
+  if (!workload || !term || !scoreType) {
+    host.innerHTML = `<p class="empty-state">Select a term, type, and subject-grade-class card to show students.</p>`;
     return;
   }
   if (!students.length) {
@@ -7883,7 +8262,7 @@ function renderAssessmentBatchRows() {
         <thead><tr><th class="assessment-sticky-name">Name</th><th class="assessment-sticky-score">${isPostTest ? "Term Exam" : "Diagnostic Test"}</th><th>${isPostTest ? "Term Exam Highest" : "Diagnostic Highest"}</th><th>Comparison</th></tr></thead>
         <tbody>
           ${students.map((student) => {
-            const existing = findAssessmentRecord(sectionId, student.id, term, subjectId, assessmentType, assessmentTitle, dateAdministered);
+            const existing = findAssessmentRecord(sectionId, student.id, term, subjectId, assessmentType, assessmentTitle, dateAdministered, workload.id);
             const scoreInputClass = isPostTest ? "assessment-post-input" : "assessment-pre-input";
             const highInputClass = isPostTest ? "assessment-post-highest-input" : "assessment-pre-highest-input";
             const scoreValue = isPostTest ? existing?.postTestScore : existing?.preTestScore;
@@ -7906,33 +8285,27 @@ function renderAssessmentBatchRows() {
 async function handleAssessmentFormSubmit(event) {
   event.preventDefault();
   const message = document.querySelector("#academicFormMessage");
-  const section = getSelectedClass(document.querySelector("#assessmentSectionId").value);
-  const subjectId = document.querySelector("#assessmentSubjectId")?.value || "";
-  const teacherUid = document.querySelector("#assessmentTeacherUid")?.value || "";
-  const assessmentType = document.querySelector("#assessmentType")?.value || "";
-  const assessmentTitle = document.querySelector("#assessmentTitle")?.value.trim() || "";
-  const dateAdministered = document.querySelector("#assessmentDateAdministered")?.value || "";
-  const remarks = document.querySelector("#assessmentRemarks")?.value.trim() || "";
   const workload = selectedAssessmentWorkload();
+  const section = getSelectedClass(workload?.sectionId || "");
+  const subjectId = workload?.subjectId || "";
+  const teacherUid = workload?.teacherId || "";
+  const term = document.querySelector("#assessmentTerm").value;
+  const scoreType = document.querySelector("#assessmentScoreType")?.value || "";
+  const assessmentType = assessmentTypeFromScoreType(scoreType);
+  const assessmentTitle = "";
+  const dateAdministered = "";
+  const remarks = "";
+  if (!section || !workload || !term || !scoreType) {
+    message.textContent = "Select a term, class, and Diagnostic Test or Term Exam.";
+    message.classList.add("error");
+    message.classList.remove("hidden");
+    return;
+  }
   const subject = schoolSubjectRecordsCache.find((item) => item.id === subjectId);
   const teacher = academicTeachersCache.find((item) => item.id === teacherUid)
     || { fullName: workload?.teacherName || currentUserProfile?.fullName || auth.currentUser.email };
-  if (!section || !subjectId || !teacherUid || !assessmentType) {
-    message.textContent = "Select a section, subject, subject teacher, and assessment type.";
-    message.classList.add("error");
-    message.classList.remove("hidden");
-    return;
-  }
   if (!canEditAssessmentSelection(section.id, teacherUid)) {
     message.textContent = "You can only encode scores for your assigned subject and section.";
-    message.classList.add("error");
-    message.classList.remove("hidden");
-    return;
-  }
-  const term = document.querySelector("#assessmentTerm").value;
-  const scoreType = document.querySelector("#assessmentScoreType")?.value || "";
-  if (!term) {
-    message.textContent = "Select a term before saving scores.";
     message.classList.add("error");
     message.classList.remove("hidden");
     return;
@@ -7969,7 +8342,7 @@ async function handleAssessmentFormSubmit(event) {
     const meanHighest = highestValues.length ? highestValues.reduce((sum, score) => sum + score, 0) / highestValues.length : 0;
     const batchMps = meanHighest ? (meanScore / meanHighest) * 100 : 0;
     for (const student of students) {
-      const existing = findAssessmentRecord(section.id, student.id, term, subjectId, assessmentType, assessmentTitle, dateAdministered);
+      const existing = findAssessmentRecord(section.id, student.id, term, subjectId, assessmentType, assessmentTitle, dateAdministered, workload.id);
       const preField = document.querySelector(`.assessment-pre-input[data-student-id="${CSS.escape(student.id)}"]`);
       const postField = document.querySelector(`.assessment-post-input[data-student-id="${CSS.escape(student.id)}"]`);
       const highestField = document.querySelector(`.assessment-highest-input[data-student-id="${CSS.escape(student.id)}"]`);
@@ -7999,6 +8372,7 @@ async function handleAssessmentFormSubmit(event) {
       const computed = calculateAssessmentValues(preTestScore, postTestScore, preHighestPossibleScore, postHighestPossibleScore);
       const data = {
         assessmentBatchId,
+        workloadId: workload.id,
         schoolYear: section.schoolYear,
         term,
         quarter: term,
@@ -8006,7 +8380,7 @@ async function handleAssessmentFormSubmit(event) {
         sectionId: section.id,
         sectionName: classLabel(section),
         subjectId,
-        subjectName: workload?.subjectName || subject?.subjectName || document.querySelector("#assessmentSubjectId")?.selectedOptions?.[0]?.textContent?.replace(/\s+\(.+\)$/, "") || "Unspecified Subject",
+        subjectName: workload?.subjectName || subject?.subjectName || "Unspecified Subject",
         subjectCategory: workload?.subjectArea || subject?.subjectArea || "",
         subjectArea: workload?.subjectArea || subject?.subjectArea || "",
         teacherUid,
@@ -8102,6 +8476,18 @@ function handleAcademicAction(event) {
     openStudentAttendanceForm();
     return;
   }
+  const toggleStudentAttendanceSection = event.target.closest(".toggle-student-attendance-section");
+  if (toggleStudentAttendanceSection) {
+    const sectionId = toggleStudentAttendanceSection.dataset.sectionId;
+    if (expandedStudentAttendanceSections.has(sectionId)) {
+      expandedStudentAttendanceSections.delete(sectionId);
+    } else {
+      expandedStudentAttendanceSections.add(sectionId);
+    }
+    const host = document.querySelector("#studentAttendanceTableHost");
+    if (host) renderStudentAttendanceSectionTable(host);
+    return;
+  }
   const editStudentAttendance = event.target.closest(".edit-student-attendance");
   if (editStudentAttendance) {
     const record = studentAttendanceRecordsCache.find((item) => item.id === editStudentAttendance.dataset.id);
@@ -8139,9 +8525,27 @@ function handleAcademicAction(event) {
     openAncillaryDutyForm();
     return;
   }
-  const viewWorkloadProfile = event.target.closest(".view-workload-profile");
+  const editTeachingLoad = event.target.closest(".edit-teaching-load");
+  if (editTeachingLoad) {
+    const record = teacherWorkloadRecordsCache.find((item) => item.id === editTeachingLoad.dataset.id);
+    if (record) openTeachingLoadForm(record);
+    return;
+  }
+  const editAncillaryDuty = event.target.closest(".edit-ancillary-duty");
+  if (editAncillaryDuty) {
+    const record = ancillaryAssignmentRecordsCache.find((item) => item.id === editAncillaryDuty.dataset.id);
+    if (record) openAncillaryDutyForm(record);
+    return;
+  }
+  const editAdvisoryClass = event.target.closest(".edit-advisory-class");
+  if (editAdvisoryClass) {
+    const record = classRecordsCache.find((item) => item.id === editAdvisoryClass.dataset.id);
+    if (record) openClassForm(record);
+    return;
+  }
+  const viewWorkloadProfile = event.target.closest(".workload-summary-row");
   if (viewWorkloadProfile) {
-    renderTeacherWorkloadDetail(viewWorkloadProfile.dataset.id);
+    renderTeacherWorkloadDetail(viewWorkloadProfile.dataset.teacherId);
     document.querySelector("#teacherWorkloadDetailHost")?.scrollIntoView({ behavior: "smooth", block: "start" });
     return;
   }
@@ -8185,6 +8589,27 @@ function handleAcademicAction(event) {
   }
   if (event.target.closest("#newAssessmentButton")) {
     openAssessmentForm();
+    return;
+  }
+  const assessmentWorkloadCard = event.target.closest(".assessment-workload-card");
+  if (assessmentWorkloadCard) {
+    const workloadId = assessmentWorkloadCard.dataset.workloadId || "";
+    const workloadField = document.querySelector("#assessmentWorkloadId");
+    if (workloadField) workloadField.value = workloadId;
+    document.querySelectorAll(".assessment-workload-card").forEach((card) => {
+      const selected = card === assessmentWorkloadCard;
+      card.classList.toggle("is-selected", selected);
+      card.setAttribute("aria-pressed", selected ? "true" : "false");
+    });
+    renderAssessmentBatchRows();
+    return;
+  }
+  const assessmentGroupRow = event.target.closest(".assessment-group-row");
+  if (assessmentGroupRow) {
+    const targetId = assessmentGroupRow.dataset.target || "";
+    const details = targetId ? document.querySelector(`#${CSS.escape(targetId)}`) : null;
+    details?.classList.toggle("hidden");
+    assessmentGroupRow.classList.toggle("is-expanded", !details?.classList.contains("hidden"));
     return;
   }
   const editAssessment = event.target.closest(".edit-assessment");
@@ -13084,7 +13509,7 @@ function openDeleteVerificationModal({ title, message, actionLabel, onConfirm })
             <button id="closeDeleteVerificationModal" class="icon-button" type="button" aria-label="Close">x</button>
           </div>
           <p>${escapeHtml(message)}</p>
-          <label>Type DELETE to continue<input id="deleteVerificationInput" autocomplete="off" required /></label>
+          <label>Enter verification code to continue<input id="deleteVerificationInput" type="password" autocomplete="off" required /></label>
           <div id="deleteVerificationMessage" class="message hidden" role="status"></div>
           <div class="modal-actions">
             <button id="cancelDeleteVerification" class="secondary-button" type="button">Cancel</button>
@@ -13101,8 +13526,8 @@ function openDeleteVerificationModal({ title, message, actionLabel, onConfirm })
     const input = document.querySelector("#deleteVerificationInput");
     const messageBox = document.querySelector("#deleteVerificationMessage");
     const submitButton = form.querySelector(".danger-button");
-    if (input.value !== "DELETE") {
-      messageBox.textContent = "Type DELETE in all caps to confirm.";
+    if (input.value !== DELETE_VERIFICATION_CODE) {
+      messageBox.textContent = "Verification code is incorrect.";
       messageBox.classList.add("error");
       messageBox.classList.remove("hidden");
       return;
@@ -13209,18 +13634,39 @@ function handleSettingsAction(event) {
   }
 }
 
+const BUTTON_FEEDBACK_VISIBLE_MS = 950;
+const BUTTON_FEEDBACK_WATCH_MS = 6000;
 const buttonFeedbackTimers = new WeakMap();
 
 function syncButtonFeedbackState(button) {
   if (!button) return;
   const pressedAt = Number(button.dataset.pressedAt || 0);
-  const wasRecentlyPressed = pressedAt && Date.now() - pressedAt < 6000;
-  if (button.disabled && (wasRecentlyPressed || button.classList.contains("is-busy"))) {
+  const elapsed = pressedAt ? Date.now() - pressedAt : 0;
+  const isButton = button instanceof HTMLButtonElement;
+  const isDisabled = isButton ? button.disabled : button.getAttribute("aria-disabled") === "true";
+  const wasRecentlyPressed = pressedAt && elapsed < BUTTON_FEEDBACK_WATCH_MS;
+  const shouldShowBusy = (wasRecentlyPressed && elapsed < BUTTON_FEEDBACK_VISIBLE_MS)
+    || (isDisabled && (wasRecentlyPressed || button.classList.contains("is-busy")));
+  if (shouldShowBusy) {
     button.classList.add("is-busy");
     button.setAttribute("aria-busy", "true");
     return;
   }
-  if (!button.disabled) {
+  if (!isDisabled) {
+    button.classList.remove("is-busy");
+    button.removeAttribute("aria-busy");
+    if (!wasRecentlyPressed) {
+      button.removeAttribute("data-pressed-at");
+    }
+  }
+}
+
+function clearButtonFeedback(button) {
+  if (!button) return;
+  const isButton = button instanceof HTMLButtonElement;
+  const isDisabled = isButton ? button.disabled : button.getAttribute("aria-disabled") === "true";
+  button.classList.remove("is-pressed");
+  if (!isDisabled) {
     button.classList.remove("is-busy");
     button.removeAttribute("aria-busy");
     button.removeAttribute("data-pressed-at");
@@ -13228,16 +13674,21 @@ function syncButtonFeedbackState(button) {
 }
 
 function showButtonFeedback(button, force = false) {
-  if (!button || (button.disabled && !force)) return;
+  if (!button) return;
+  const isButton = button instanceof HTMLButtonElement;
+  const isDisabled = isButton ? button.disabled : button.getAttribute("aria-disabled") === "true";
+  if (isDisabled && !force) return;
   button.dataset.pressedAt = String(Date.now());
-  button.classList.add("is-pressed");
+  button.classList.add("is-pressed", "is-busy");
+  button.setAttribute("aria-busy", "true");
   clearTimeout(buttonFeedbackTimers.get(button));
   buttonFeedbackTimers.set(button, setTimeout(() => {
     button.classList.remove("is-pressed");
     syncButtonFeedbackState(button);
-  }, 850));
+  }, BUTTON_FEEDBACK_VISIBLE_MS));
   setTimeout(() => syncButtonFeedbackState(button), 80);
   setTimeout(() => syncButtonFeedbackState(button), 500);
+  setTimeout(() => clearButtonFeedback(button), BUTTON_FEEDBACK_WATCH_MS);
 }
 
 function watchButtonLoadingFeedback() {
@@ -13334,7 +13785,7 @@ function bindEvents() {
   });
 
   document.addEventListener("click", (event) => {
-    showButtonFeedback(event.target.closest("button"));
+    showButtonFeedback(event.target.closest("button, .link-button"));
 
     if (
       els.notificationDropdown &&
@@ -13509,6 +13960,19 @@ function bindEvents() {
       event.preventDefault();
       navigateToModule(event.target.dataset.module);
     }
+    if ((event.key === "Enter" || event.key === " ") && event.target?.classList?.contains("workload-summary-row")) {
+      event.preventDefault();
+      renderTeacherWorkloadDetail(event.target.dataset.teacherId);
+      document.querySelector("#teacherWorkloadDetailHost")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+    if ((event.key === "Enter" || event.key === " ") && event.target?.classList?.contains("assessment-group-row")) {
+      event.preventDefault();
+      event.target.click();
+    }
+    if ((event.key === "Enter" || event.key === " ") && event.target?.classList?.contains("assessment-workload-card")) {
+      event.preventDefault();
+      event.target.click();
+    }
     if (event.key === "Enter" && event.target?.classList?.contains("assessment-score-input")) {
       event.preventDefault();
       const scoreFields = [...document.querySelectorAll(".assessment-score-input")];
@@ -13588,31 +14052,24 @@ function bindEvents() {
     if (event.target.id === "attendanceSectionId") {
       renderAttendanceBatchRows();
     }
-    if (event.target.id === "assessmentSectionId") {
-      syncAssessmentSectionFields();
-      renderAssessmentBatchRows();
-    }
-    if (event.target.id === "assessmentSubjectId") {
-      syncAssessmentTeacherFromSubject();
-      renderAssessmentBatchRows();
-    }
-    if (["assessmentTerm", "assessmentScoreType", "assessmentType", "assessmentTitle", "assessmentDateAdministered"].includes(event.target.id)) {
-      if (event.target.id === "assessmentType") syncAssessmentScoreTypeFromType();
+    if (["assessmentTerm", "assessmentWorkloadId", "assessmentScoreType"].includes(event.target.id)) {
       renderAssessmentBatchRows();
     }
     if (event.target.classList?.contains("assessment-pre-input") || event.target.classList?.contains("assessment-post-input") || event.target.classList?.contains("assessment-highest-input")) {
       const studentId = event.target.dataset.studentId;
-      const sectionId = document.querySelector("#assessmentSectionId")?.value || "";
+      const workload = selectedAssessmentWorkload();
+      const sectionId = workload?.sectionId || "";
       const term = document.querySelector("#assessmentTerm")?.value || "";
       const scoreType = document.querySelector("#assessmentScoreType")?.value || "";
       const existing = findAssessmentRecord(
         sectionId,
         studentId,
         term,
-        document.querySelector("#assessmentSubjectId")?.value || "",
-        document.querySelector("#assessmentType")?.value || "",
-        document.querySelector("#assessmentTitle")?.value.trim() || "",
-        document.querySelector("#assessmentDateAdministered")?.value || ""
+        workload?.subjectId || "",
+        assessmentTypeFromScoreType(scoreType),
+        "",
+        "",
+        workload?.id || ""
       );
       const preField = document.querySelector(`.assessment-pre-input[data-student-id="${CSS.escape(studentId)}"]`);
       const postField = document.querySelector(`.assessment-post-input[data-student-id="${CSS.escape(studentId)}"]`);
@@ -13662,14 +14119,7 @@ function bindEvents() {
     if (["attendanceSectionId", "attendanceDate"].includes(event.target.id)) {
       renderAttendanceBatchRows();
     }
-    if (event.target.id === "assessmentSectionId") {
-      syncAssessmentSectionFields();
-    }
-    if (event.target.id === "assessmentSubjectId") {
-      syncAssessmentTeacherFromSubject();
-    }
-    if (["assessmentSectionId", "assessmentTerm", "assessmentScoreType", "assessmentSubjectId", "assessmentType", "assessmentTitle", "assessmentDateAdministered"].includes(event.target.id)) {
-      if (event.target.id === "assessmentType") syncAssessmentScoreTypeFromType();
+    if (["assessmentWorkloadId", "assessmentTerm", "assessmentScoreType"].includes(event.target.id)) {
       renderAssessmentBatchRows();
     }
     if (["gradeWorkloadId", "gradeSubmissionTerm"].includes(event.target.id)) {

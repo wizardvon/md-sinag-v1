@@ -5,7 +5,14 @@
   "hosting": {
     "public": ".",
     "ignore": [
+      ".env*",
+      ".firebase/**",
+      ".git/**",
+      ".gitignore",
+      "codex-static-server.cjs",
       "firebase.json",
+      "firestore.rules",
+      "README.md",
       "**/.*",
       "**/node_modules/**"
     ],

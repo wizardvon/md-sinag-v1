@@ -1887,7 +1887,7 @@ service cloud.firestore {
         && request.resource.data.teacherUid.size() > 0
         && request.resource.data.teacherName is string
         && request.resource.data.teacherName.size() > 0
-        && request.resource.data.assessmentType in ["Diagnostic Test", "Quarterly Exam", "Long Test", "Post Test", "Other"]
+        && request.resource.data.assessmentType in ["Diagnostic Test", "Term Exam"]
         && request.resource.data.assessmentTitle is string
         && request.resource.data.dateAdministered is string
         && request.resource.data.totalItems is number
