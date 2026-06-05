@@ -1447,7 +1447,7 @@ service cloud.firestore {
     function isAcademicViewer() {
       return signedIn()
         && userDoc(request.auth.uid).data.status == "approved"
-        && currentRole() in ["Principal", "Master Teacher", "Head Teacher", "Registrar"];
+        && currentRole() in ["Principal", "Admin", "SuperAdmin", "Master Teacher", "Head Teacher", "Registrar"];
     }
 
     function isTeacherAttendanceViewer() {
@@ -1465,14 +1465,15 @@ service cloud.firestore {
     function isTeacherWorkloadViewer() {
       return signedIn()
         && userDoc(request.auth.uid).data.status == "approved"
-        && currentRole() in ["Principal", "Master Teacher", "Head Teacher", "Teacher"];
+        && currentRole() in ["Principal", "Admin", "SuperAdmin", "Master Teacher", "Head Teacher", "Teacher"];
     }
 
     function canReadTeacherWorkloadRecord() {
       return isTeacherWorkloadViewer()
         && (
-          currentRole() in ["Principal", "Master Teacher", "Head Teacher"]
-          || resource.data.teacherId == request.auth.uid
+          currentRole() in ["Principal", "Admin", "SuperAdmin", "Master Teacher", "Head Teacher"]
+          || ("teacherUid" in resource.data && resource.data.teacherUid == request.auth.uid)
+          || ("teacherId" in resource.data && resource.data.teacherId == request.auth.uid)
           || (
             resource.data.sectionId is string
             && get(/databases/$(database)/documents/classes/$(resource.data.sectionId)).data.adviserId == request.auth.uid
@@ -1483,14 +1484,15 @@ service cloud.firestore {
     function isGradeSubmissionViewer() {
       return signedIn()
         && userDoc(request.auth.uid).data.status == "approved"
-        && currentRole() in ["Principal", "Master Teacher", "Head Teacher", "Teacher"];
+        && currentRole() in ["Principal", "Admin", "SuperAdmin", "Master Teacher", "Head Teacher", "Teacher"];
     }
 
     function canReadGradeSubmissionRecord() {
       return isGradeSubmissionViewer()
         && (
-          currentRole() in ["Principal", "Master Teacher", "Head Teacher"]
-          || resource.data.teacherId == request.auth.uid
+          currentRole() in ["Principal", "Admin", "SuperAdmin", "Master Teacher", "Head Teacher"]
+          || ("teacherUid" in resource.data && resource.data.teacherUid == request.auth.uid)
+          || ("teacherId" in resource.data && resource.data.teacherId == request.auth.uid)
           || (
             resource.data.sectionId is string
             && get(/databases/$(database)/documents/classes/$(resource.data.sectionId)).data.adviserId == request.auth.uid
@@ -1515,12 +1517,6 @@ service cloud.firestore {
         && userDoc(request.auth.uid).data.status == "approved"
         && resource.data.sectionId is string
         && get(/databases/$(database)/documents/classes/$(resource.data.sectionId)).data.adviserId == request.auth.uid;
-    }
-
-    function isAssignedAdviserByRequest() {
-      return signedIn()
-        && userDoc(request.auth.uid).data.status == "approved"
-        && request.resource.data.adviserId == request.auth.uid;
     }
 
     function canReadAcademicRecord() {
@@ -1792,26 +1788,99 @@ service cloud.firestore {
     function validGradeSubmissionWrite() {
       return isGradeSubmissionViewer()
         && currentRole() in ["Teacher", "Master Teacher", "Head Teacher"]
+        && request.resource.data.keys().hasOnly([
+          "workloadId",
+          "teacherId",
+          "teacherUid",
+          "teacherName",
+          "schoolYear",
+          "term",
+          "quarter",
+          "gradeLevel",
+          "sectionId",
+          "sectionName",
+          "subjectId",
+          "subjectName",
+          "subjectArea",
+          "subjectCategory",
+          "submissionStatus",
+          "dateSubmitted",
+          "remarks",
+          "grades",
+          "createdBy",
+          "createdByName",
+          "createdAt",
+          "updatedAt"
+        ])
         && request.resource.data.workloadId is string
+        && request.resource.data.workloadId.size() > 0
         && get(/databases/$(database)/documents/teacherWorkloads/$(request.resource.data.workloadId)).data.teacherId == request.auth.uid
+        && request.resource.data.teacherUid == request.auth.uid
         && request.resource.data.teacherId == request.auth.uid
         && request.resource.data.teacherName is string
+        && request.resource.data.teacherName.size() > 0
+        && request.resource.data.subjectId is string
         && request.resource.data.subjectName is string
+        && request.resource.data.subjectName.size() > 0
+        && request.resource.data.subjectCategory is string
         && request.resource.data.subjectArea is string
         && request.resource.data.sectionId is string
+        && request.resource.data.sectionId.size() > 0
         && request.resource.data.sectionName is string
+        && request.resource.data.sectionName.size() > 0
         && request.resource.data.gradeLevel is string
+        && request.resource.data.gradeLevel.size() > 0
         && request.resource.data.schoolYear is string
-        && request.resource.data.adviserId is string
-        && request.resource.data.studentId is string
-        && request.resource.data.studentName is string
+        && request.resource.data.schoolYear.size() > 0
         && validAssessmentTerm(request.resource.data.term)
-        && request.resource.data.grade is number
-        && request.resource.data.grade >= 0
-        && request.resource.data.grade <= 100
-        && request.resource.data.encodedBy == request.auth.uid
-        && request.resource.data.encodedByName is string
+        && request.resource.data.quarter == request.resource.data.term
+        && request.resource.data.submissionStatus in ["Draft", "Submitted"]
+        && request.resource.data.dateSubmitted is string
+        && (
+          request.resource.data.submissionStatus != "Submitted"
+          || request.resource.data.dateSubmitted.size() > 0
+        )
+        && request.resource.data.remarks is string
+        && request.resource.data.grades is map
+        && (
+          request.resource.data.submissionStatus != "Submitted"
+          || request.resource.data.grades.keys().size() > 0
+        )
+        && request.resource.data.createdBy == request.auth.uid
+        && request.resource.data.createdByName is string
         && request.resource.data.createdAt is timestamp
+        && request.resource.data.updatedAt is timestamp;
+    }
+
+    function validGradeSubmissionOwnerUpdate() {
+      return validGradeSubmissionWrite()
+        && resource.data.teacherId == request.auth.uid
+        && (!("teacherUid" in resource.data) || resource.data.teacherUid == request.auth.uid)
+        && (!("submissionStatus" in resource.data) || resource.data.submissionStatus != "Approved")
+        && request.resource.data.submissionStatus in ["Draft", "Submitted"]
+        && (!("createdAt" in resource.data) || request.resource.data.createdAt == resource.data.createdAt)
+        && (!("createdBy" in resource.data) || request.resource.data.createdBy == resource.data.createdBy)
+        && (!("createdByName" in resource.data) || request.resource.data.createdByName == resource.data.createdByName)
+        && request.resource.data.workloadId == resource.data.workloadId
+        && request.resource.data.teacherId == resource.data.teacherId
+        && (!("teacherUid" in resource.data) || request.resource.data.teacherUid == resource.data.teacherUid)
+        && (!("term" in resource.data) || request.resource.data.term == resource.data.term)
+        && (!("quarter" in resource.data) || request.resource.data.quarter == resource.data.quarter)
+        && request.resource.data.sectionId == resource.data.sectionId
+        && (!("subjectId" in resource.data) || request.resource.data.subjectId == resource.data.subjectId);
+    }
+
+    function validGradeSubmissionReviewUpdate() {
+      return isGradeSubmissionViewer()
+        && currentRole() in ["Principal", "Master Teacher", "Head Teacher"]
+        && resource.data.submissionStatus == "Submitted"
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          "submissionStatus",
+          "remarks",
+          "updatedAt"
+        ])
+        && request.resource.data.submissionStatus in ["Returned", "Approved"]
+        && request.resource.data.remarks is string
         && request.resource.data.updatedAt is timestamp;
     }
 
@@ -1929,12 +1998,8 @@ service cloud.firestore {
     function canWriteAssessmentRecord() {
       return signedIn()
         && userDoc(request.auth.uid).data.status == "approved"
-        && (
-          isApprovedPrincipal()
-          || currentRole() in ["Master Teacher", "Head Teacher", "Registrar"]
-          || request.resource.data.teacherUid == request.auth.uid
-          || request.resource.data.adviserId == request.auth.uid
-        );
+        && currentRole() in ["Teacher", "Master Teacher", "Head Teacher"]
+        && request.resource.data.teacherUid == request.auth.uid;
     }
 
     function canReadAssessmentRecord() {
@@ -2160,12 +2225,7 @@ service cloud.firestore {
     match /gradeSubmissions/{recordId} {
       allow create: if validGradeSubmissionWrite();
       allow read: if canReadGradeSubmissionRecord();
-      allow update: if validGradeSubmissionWrite()
-        && request.resource.data.createdAt == resource.data.createdAt
-        && request.resource.data.workloadId == resource.data.workloadId
-        && request.resource.data.teacherId == resource.data.teacherId
-        && request.resource.data.studentId == resource.data.studentId
-        && request.resource.data.term == resource.data.term;
+      allow update: if validGradeSubmissionOwnerUpdate() || validGradeSubmissionReviewUpdate();
       allow delete: if isApprovedPrincipal();
     }
 
@@ -2194,8 +2254,11 @@ service cloud.firestore {
       allow update: if canWriteAssessmentRecord()
         && validAssessmentWrite()
         && (
-          request.resource.data.adviserId == resource.data.adviserId
-          || request.resource.data.teacherUid == resource.data.teacherUid
+          ("teacherUid" in resource.data && request.resource.data.teacherUid == resource.data.teacherUid)
+          || (
+            !("teacherUid" in resource.data)
+            && ("encodedBy" in resource.data && resource.data.encodedBy == request.auth.uid)
+          )
         );
       allow delete: if isApprovedPrincipal();
     }

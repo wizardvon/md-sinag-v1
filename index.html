@@ -17,6 +17,7 @@
       <section id="authView" class="auth-layout">
         <div class="auth-brand">
           <div>
+            <img src="assets/sinag_logo.png" alt="Project SINAG logo" class="auth-logo" />
             <p class="eyebrow">Project SINAG</p>
             <h1>School Integrated Network for Analytics and Governance</h1>
             <p>
@@ -132,6 +133,15 @@
               <h1 id="dashboardTitle">Dashboard</h1>
             </div>
             <div class="topbar-actions">
+              <label class="topbar-search" for="globalSearch">
+                <span aria-hidden="true">⌕</span>
+                <input
+                  id="globalSearch"
+                  type="search"
+                  placeholder="Search modules, reports, learners..."
+                  autocomplete="off"
+                />
+              </label>
               <div class="notification-center">
                 <button
                   id="notificationBell"
@@ -157,6 +167,13 @@
                     <p class="empty-state">Loading notifications...</p>
                   </div>
                 </section>
+              </div>
+              <div class="user-chip" aria-label="Current user">
+                <span id="userInitials" class="user-avatar">PS</span>
+                <div>
+                  <strong id="userFullName">Project SINAG</strong>
+                  <small id="userRoleName">User</small>
+                </div>
               </div>
             </div>
           </header>

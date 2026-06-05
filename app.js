@@ -115,11 +115,15 @@ const els = {
   sidebar: document.querySelector("#sidebar"),
   sidebarNav: document.querySelector("#sidebarNav"),
   menuToggle: document.querySelector("#menuToggle"),
+  globalSearch: document.querySelector("#globalSearch"),
   notificationBell: document.querySelector("#notificationBell"),
   notificationBadge: document.querySelector("#notificationBadge"),
   notificationDropdown: document.querySelector("#notificationDropdown"),
   notificationList: document.querySelector("#notificationList"),
   markAllNotificationsRead: document.querySelector("#markAllNotificationsRead"),
+  userInitials: document.querySelector("#userInitials"),
+  userFullName: document.querySelector("#userFullName"),
+  userRoleName: document.querySelector("#userRoleName"),
   roleLabel: document.querySelector("#roleLabel"),
   dashboardTitle: document.querySelector("#dashboardTitle"),
   dashboardContent: document.querySelector("#dashboardContent"),
@@ -146,6 +150,8 @@ const WORKLOAD_RULES = {
 };
 
 const DELETE_VERIFICATION_CODE = "lupinthestalker";
+const gradeSubmissionStatusOptions = ["Not Started", "Draft", "Submitted", "Returned", "Approved"];
+const gradeSubmissionCompliedStatuses = ["Submitted", "Approved"];
 
 let auth;
 let db;
@@ -192,7 +198,10 @@ let ancillaryAssignmentRecordsCache = [];
 let teacherWorkloadSummariesCache = [];
 let filteredTeacherWorkloadSummaries = [];
 let gradeSubmissionRecordsCache = [];
-let filteredGradeWorkloads = [];
+let filteredGradeSubmissionRows = [];
+let filteredGradeSubmissionGroups = [];
+let editingGradeSubmissionId = null;
+let editingGradeSubmissionRowKey = "";
 let lessonPlanRecordsCache = [];
 let filteredLessonPlans = [];
 let taskVisibilitySettingsCache = null;
@@ -518,14 +527,48 @@ function renderDashboard(profile) {
 
   els.roleLabel.textContent = profile.role;
   els.dashboardTitle.textContent = dashboardIdToTitle(dashboardId);
+  updateTopbarProfile(profile);
   els.sidebarNav.innerHTML = modules
     .map(
       (module, index) =>
-        `<button class="nav-button ${index === 0 ? "active" : ""}" type="button" data-module="${module}">${module}</button>`
+        `<button class="nav-button ${index === 0 ? "active" : ""}" type="button" data-module="${escapeAttribute(module)}"><span class="nav-icon" aria-hidden="true">${getModuleIcon(module)}</span><span>${escapeHtml(module)}</span></button>`
     )
     .join("");
 
   renderDashboardHome(dashboardId, profile.role);
+}
+
+function updateTopbarProfile(profile) {
+  const displayName = profile?.fullName || auth?.currentUser?.email || "Project SINAG";
+  if (els.userFullName) els.userFullName.textContent = displayName;
+  if (els.userRoleName) els.userRoleName.textContent = profile?.role || "User";
+  if (els.userInitials) els.userInitials.textContent = getInitials(displayName);
+}
+
+function getInitials(value = "") {
+  const parts = String(value).trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) return "PS";
+  return parts.slice(0, 2).map((part) => part[0]?.toUpperCase() || "").join("");
+}
+
+function getModuleIcon(moduleName = "") {
+  const normalized = moduleName.toLowerCase();
+  if (normalized.includes("dashboard")) return "⌂";
+  if (normalized.includes("setup") || normalized.includes("classes")) return "▦";
+  if (normalized.includes("enrollment")) return "◉";
+  if (normalized.includes("attendance")) return "✓";
+  if (normalized.includes("observation")) return "◌";
+  if (normalized.includes("learner")) return "◍";
+  if (normalized.includes("diagnostic") || normalized.includes("grade")) return "▥";
+  if (normalized.includes("lesson")) return "▤";
+  if (normalized.includes("workload")) return "◇";
+  if (normalized.includes("report")) return "▣";
+  if (normalized.includes("financial")) return "₱";
+  if (normalized.includes("ppa")) return "⬟";
+  if (normalized.includes("inventory")) return "◫";
+  if (normalized.includes("document")) return "▧";
+  if (normalized.includes("settings")) return "⚙";
+  return "•";
 }
 
 function dashboardIdToTitle(dashboardId) {
@@ -797,14 +840,18 @@ function renderDashboardStatCard(label, value, availableModules) {
   const moduleName = getDashboardCardModule(label, availableModules);
   const canOpenModule = moduleName && availableModules.includes(moduleName);
   const metricParts = getDashboardMetricParts(label, value);
+  const cardTone = getDashboardCardTone(label, moduleName);
   return `
     <article
-      class="stat-card ${canOpenModule ? "dashboard-module-card" : ""}"
+      class="stat-card stat-card-${cardTone} ${canOpenModule ? "dashboard-module-card" : ""}"
       data-card-label="${escapeHtml(label)}"
       ${canOpenModule ? `role="button" tabindex="0" data-module="${escapeHtml(moduleName)}" aria-label="Open ${escapeHtml(moduleName)}"` : ""}
     >
       <div class="stat-card-top">
-        <span>${escapeHtml(label)}</span>
+        <div class="stat-card-label">
+          <span class="stat-icon" aria-hidden="true">${getModuleIcon(moduleName || label)}</span>
+          <span>${escapeHtml(label)}</span>
+        </div>
         ${canOpenModule ? `<b>${escapeHtml(moduleName)}</b>` : ""}
       </div>
       <div class="stat-card-metrics">${renderDashboardMetricMarkup(label, value, metricParts)}</div>
@@ -826,6 +873,14 @@ function renderDashboardMetricMarkup(label, value, metricParts = getDashboardMet
     `;
   }
   return `<strong>${escapeHtml(value)}</strong>`;
+}
+
+function getDashboardCardTone(label = "", moduleName = "") {
+  const normalized = `${label} ${moduleName}`.toLowerCase();
+  if (/(learner|ppa|approved|completed|success)/.test(normalized)) return "green";
+  if (/(urgent|pending|late|warning|workload|inventory|attendance)/.test(normalized)) return "amber";
+  if (/(financial|document|grade|academic|diagnostic)/.test(normalized)) return "blue";
+  return "navy";
 }
 
 function getDashboardMetricParts(label = "", value = "") {
@@ -886,7 +941,7 @@ function getDashboardCardModule(label = "", availableModules = []) {
     return "Teacher Workload";
   }
   if (/(grade submission|grades submitted|grades pending|subject grades)/.test(normalized)) {
-    return "Grade Submission Tracker";
+    return "Grade Submission";
   }
   if (/(lesson plans|dll|lesson plan)/.test(normalized)) {
     return "Lesson Plans";
@@ -1800,13 +1855,11 @@ function getDownloadableReportDefinitions() {
       statusField: "status",
       categoryField: "observationType",
       loader: getVisibleClassroomObservations,
-      headers: ["Teacher", "Observer", "Subject", "Grade", "Section", "Type", "Date", "Time", "Status", "Report Link"],
+      headers: ["Teacher", "Observer", "Class", "Type", "Date", "Time", "Status", "Report Link"],
       row: (record) => [
         record.teacherName,
         record.observerName,
-        record.subject,
-        record.gradeLevel,
-        record.section,
+        subjectGradeSectionClassLabel(record),
         record.observationType,
         record.observationDate,
         record.observationTime,
@@ -2034,10 +2087,10 @@ function getDownloadableReportDefinitions() {
           classRecordsCache = await getVisibleClasses();
           return getVisibleAssessments();
         },
-        headers: ["Student", "Section", "School Year", "Term", "Diagnostic", "Diagnostic High", "Diagnostic %", "Exam", "Exam High", "Exam %", "Improvement %"],
+        headers: ["Student", "Class", "School Year", "Term", "Diagnostic", "Diagnostic High", "Diagnostic %", "Exam", "Exam High", "Exam %", "Improvement %"],
         row: (record) => [
           record.studentName,
-          record.sectionName,
+          subjectGradeSectionClassLabel(record, "No section"),
           record.schoolYear,
           record.term,
           record.preTestScore,
@@ -2090,7 +2143,7 @@ function getDownloadableReportDefinitions() {
         ]);
         return buildTeacherWorkloadSummaries();
       },
-      headers: ["Teacher", "Department", "Teaching Hours", "Preparations", "Ancillary Hours", "Score", "Status", "Sections"],
+      headers: ["Teacher", "Department", "Teaching Hours", "Preparations", "Ancillary Hours", "Score", "Status", "Classes"],
       row: (record) => [
         record.teacherName,
         record.department,
@@ -2108,21 +2161,33 @@ function getDownloadableReportDefinitions() {
     definitions.push({
       id: "gradeSubmissions",
       label: "Grade Submission",
-      description: "Submitted student grades by teacher, subject, section, and term.",
+      description: "Subject-based grade submission tracking by section, teacher, term, and status.",
       dateField: "updatedAt",
-      statusField: "term",
+      statusField: "submissionStatus",
       categoryField: "subjectName",
-      loader: getVisibleGradeSubmissions,
-      headers: ["Teacher", "Subject", "Section", "Student", "Term", "Grade", "Encoded By", "Updated At"],
+      loader: async () => {
+        await loadTeacherWorkloadTeachers();
+        [classRecordsCache, teacherWorkloadRecordsCache, schoolSubjectRecordsCache] = await Promise.all([
+          getVisibleClasses(),
+          getVisibleTeacherWorkloadRecords(),
+          getVisibleSchoolSubjects(),
+        ]);
+        classRecordsCache = mergeClassesWithWorkloadSections(classRecordsCache, teacherWorkloadRecordsCache);
+        studentRecordsCache = await getAssessmentVisibleStudents(classRecordsCache);
+        gradeSubmissionRecordsCache = await getVisibleGradeSubmissions();
+        return buildGradeSubmissionRows();
+      },
+      headers: ["School Year", "Term / Quarter", "Class", "Subject Teacher", "Encoded Students", "Date Submitted", "Status", "Remarks", "Legacy"],
       row: (record) => [
-        record.teacherName,
-        record.subjectName,
-        record.sectionName,
-        record.studentName,
+        record.schoolYear,
         record.term,
-        record.grade,
-        record.encodedByName,
-        formatDate(record.updatedAt),
+        subjectGradeSectionClassLabel(record, "No section"),
+        record.teacherName,
+        `${Number(record.encodedStudents || 0)} / ${Number(record.totalStudents || 0)}`,
+        record.dateSubmitted,
+        record.submissionStatus,
+        record.remarks,
+        record.isLegacy ? "Yes" : "No",
       ],
     });
   }
@@ -3630,17 +3695,20 @@ function canViewAllAcademic(role = currentUserProfile?.role) {
   return academicViewerRoles.includes(role);
 }
 
+function canEncodeAssessmentScores() {
+  return Boolean(auth?.currentUser?.uid && ["Teacher", "Master Teacher", "Head Teacher"].includes(currentUserProfile?.role));
+}
+
 function canEditSectionRecords(sectionId) {
   return Boolean(sectionId && auth?.currentUser?.uid && classRecordsCache.some((record) => record.id === sectionId && record.adviserId === auth.currentUser.uid));
 }
 
 function canEditAssessmentRecord(record = {}) {
   if (!auth?.currentUser?.uid) return false;
-  if (canViewAllAcademic()) return true;
-  return record.teacherUid === auth.currentUser.uid
-    || record.encodedBy === auth.currentUser.uid
-    || record.createdBy === auth.currentUser.uid
-    || canEditSectionRecords(record.sectionId);
+  const ownerUid = record.teacherUid || record.teacherId || "";
+  return ownerUid
+    ? ownerUid === auth.currentUser.uid
+    : record.encodedBy === auth.currentUser.uid || record.createdBy === auth.currentUser.uid;
 }
 
 async function getVisibleSectionScopedRecords(collectionName) {
@@ -3805,8 +3873,8 @@ function canViewGradeSubmissionModule(role = currentUserProfile?.role) {
   return gradeSubmissionRoles.includes(role);
 }
 
-function canEncodeGradeForWorkload(workload) {
-  return Boolean(workload?.teacherId && workload.teacherId === auth.currentUser.uid);
+function canMonitorAllGradeSubmissions(role = currentUserProfile?.role) {
+  return ["Principal", "Admin", "SuperAdmin", "Master Teacher", "Head Teacher"].includes(role);
 }
 
 function canViewLessonPlanModule(role = currentUserProfile?.role) {
@@ -3904,14 +3972,17 @@ function assessmentScopeMatches(record, scoreType, settings = taskVisibilitySett
 
 async function getVisibleGradeSubmissions() {
   if (!canViewGradeSubmissionModule()) return [];
-  if (["Principal", "Master Teacher", "Head Teacher"].includes(currentUserProfile?.role)) {
+  if (canMonitorAllGradeSubmissions()) {
     const snapshot = await getDocs(collection(db, "gradeSubmissions"));
     return snapshot.docs.map(normalizeRecord);
   }
 
   const records = new Map();
-  const mine = await getDocs(query(collection(db, "gradeSubmissions"), where("teacherId", "==", auth.currentUser.uid)));
-  mine.docs.forEach((record) => records.set(record.id, normalizeRecord(record)));
+  const [mineByTeacherId, mineByTeacherUid] = await Promise.all([
+    getDocs(query(collection(db, "gradeSubmissions"), where("teacherId", "==", auth.currentUser.uid))),
+    getDocs(query(collection(db, "gradeSubmissions"), where("teacherUid", "==", auth.currentUser.uid))).catch(() => ({ docs: [] })),
+  ]);
+  [...mineByTeacherId.docs, ...mineByTeacherUid.docs].forEach((record) => records.set(record.id, normalizeRecord(record)));
 
   const advisoryClasses = classRecordsCache.length
     ? classRecordsCache.filter((section) => section.adviserId === auth.currentUser.uid)
@@ -3923,32 +3994,242 @@ async function getVisibleGradeSubmissions() {
   return [...records.values()];
 }
 
-async function getVisibleGradeTrackerStudents(workloads = teacherWorkloadRecordsCache) {
-  if (currentUserProfile?.role !== "Teacher") return getVisibleStudents();
-  const sectionIds = [...new Set([
-    ...workloads.map((workload) => workload.sectionId).filter(Boolean),
-    ...classRecordsCache.filter((section) => section.adviserId === auth.currentUser.uid).map((section) => section.id),
-  ])];
-  const records = new Map();
-  const snapshots = await Promise.all(
-    sectionIds.map((sectionId) => getDocs(query(collection(db, "students"), where("sectionId", "==", sectionId))))
-  );
-  snapshots.flatMap((snapshot) => snapshot.docs).forEach((record) => records.set(record.id, normalizeRecord(record)));
-  return [...records.values()];
+function mergeClassesWithWorkloadSections(classes = [], workloads = []) {
+  const merged = new Map(classes.map((record) => [record.id, record]));
+  workloads.forEach((workload) => {
+    if (!workload.sectionId || merged.has(workload.sectionId)) return;
+    merged.set(workload.sectionId, {
+      id: workload.sectionId,
+      gradeLevel: workload.gradeLevel || "",
+      sectionName: assessmentSectionOnlyLabel(workload.sectionName || "Assigned section"),
+      schoolYear: workload.schoolYear || "",
+      adviserId: workload.adviserId || "",
+      adviserName: workload.adviserName || "",
+      status: "active",
+    });
+  });
+  return [...merged.values()];
 }
 
 function gradeWorkloadLabel(workload) {
-  const subject = workload.subjectName || "Subject";
-  const grade = workload.gradeLevel ? workload.gradeLevel.replace("Grade ", "") : "";
-  return `${subject}${grade ? ` ${grade}` : ""}`;
+  return subjectGradeSectionClassLabel(workload);
 }
 
-function getGradeRecord(workloadId, studentId, term) {
-  return gradeSubmissionRecordsCache.find((record) =>
-    record.workloadId === workloadId
-    && record.studentId === studentId
-    && record.term === term
+function gradeSubmissionSubjectName(record = {}) {
+  return record.subjectName || "Unspecified Subject";
+}
+
+function gradeSubmissionSubjectCategory(record = {}) {
+  return record.subjectCategory || record.subjectArea || "";
+}
+
+function gradeSubmissionTeacherUid(record = {}) {
+  return record.teacherUid || record.teacherId || "";
+}
+
+function gradeSubmissionTeacherName(record = {}) {
+  return record.teacherName || record.adviserName || record.encodedByName || record.createdByName || "Unspecified Teacher";
+}
+
+function gradeSubmissionStatus(record = {}) {
+  if (gradeSubmissionStatusOptions.includes(record.submissionStatus)) return record.submissionStatus;
+  if (record.submissionStatus === "Not Submitted") return "Not Started";
+  if (["Late", "Reviewed"].includes(record.submissionStatus)) return "Submitted";
+  if (record.studentId || record.grade !== undefined) return "Submitted";
+  return "Not Started";
+}
+
+function isLegacyGradeSubmissionRecord(record = {}) {
+  return Boolean((record.studentId || record.grade !== undefined) && !record.submissionStatus);
+}
+
+function gradeSubmissionRecordKey(record = {}) {
+  return [
+    record.workloadId || "",
+    record.schoolYear || "",
+    record.term || record.quarter || "",
+    record.gradeLevel || "",
+    record.sectionId || record.sectionName || "",
+    record.subjectId || gradeSubmissionSubjectName(record),
+    gradeSubmissionTeacherUid(record) || gradeSubmissionTeacherName(record),
+  ].join("|");
+}
+
+function gradeSubmissionWorkloadKey(workload = {}, term = "") {
+  const section = getSelectedClass(workload.sectionId);
+  return [
+    workload.id || "",
+    section?.schoolYear || workload.schoolYear || "",
+    term,
+    workload.gradeLevel || section?.gradeLevel || "",
+    workload.sectionId || workload.sectionName || "",
+    workload.subjectId || workload.subjectName || "",
+    workload.teacherId || workload.teacherName || "",
+  ].join("|");
+}
+
+function gradeSubmissionRowKey(row = {}) {
+  return [
+    row.workloadId || "",
+    row.schoolYear || "",
+    row.term || "",
+    row.gradeLevel || "",
+    row.sectionId || row.sectionName || "",
+    row.subjectId || row.subjectName || "",
+    row.teacherUid || row.teacherName || "",
+  ].join("|");
+}
+
+function normalizeGradeSubmissionRecordRow(record = {}, groupedRecords = [record]) {
+  const first = groupedRecords[0] || record || {};
+  const status = gradeSubmissionStatus(first);
+  const teacherUid = gradeSubmissionTeacherUid(first);
+  const subjectName = gradeSubmissionSubjectName(first);
+  const grades = gradeSubmissionGradesMap(first, groupedRecords);
+  const encodedStudents = gradeSubmissionEncodedCount({ grades, isLegacy: groupedRecords.some(isLegacyGradeSubmissionRecord), legacyCount: groupedRecords.length });
+  const totalStudents = gradeSubmissionTotalStudents(first.sectionId);
+  const row = {
+    id: first.id || gradeSubmissionRecordKey(first),
+    recordId: first.submissionStatus ? first.id : "",
+    recordIds: groupedRecords.map((item) => item.id).filter(Boolean),
+    batchId: first.batchId || "",
+    workloadId: first.workloadId || "",
+    schoolYear: first.schoolYear || "",
+    term: first.term || first.quarter || "",
+    quarter: first.quarter || first.term || "",
+    gradeLevel: first.gradeLevel || "",
+    sectionId: first.sectionId || "",
+    sectionName: first.sectionName || "",
+    subjectId: first.subjectId || "",
+    subjectName,
+    subjectCategory: gradeSubmissionSubjectCategory(first),
+    teacherUid,
+    teacherId: teacherUid,
+    teacherName: gradeSubmissionTeacherName(first),
+    adviserId: first.adviserId || "",
+    dueDate: first.dueDate || "",
+    dateSubmitted: first.dateSubmitted || first.submittedAt || "",
+    submissionStatus: status,
+    grades,
+    encodedStudents,
+    totalStudents,
+    remarks: first.remarks || (isLegacyGradeSubmissionRecord(first) ? `${groupedRecords.length} legacy student grade entr${groupedRecords.length === 1 ? "y" : "ies"}` : ""),
+    createdBy: first.createdBy || first.encodedBy || "",
+    createdByName: first.createdByName || first.encodedByName || "",
+    createdAt: first.createdAt || null,
+    updatedAt: first.updatedAt || first.createdAt || null,
+    isLegacy: groupedRecords.some(isLegacyGradeSubmissionRecord),
+    isVirtual: false,
+  };
+  row.key = gradeSubmissionRowKey(row);
+  return row;
+}
+
+function gradeSubmissionExpectedWorkloads() {
+  return teacherWorkloadRecordsCache.filter((workload) => workload.sectionId);
+}
+
+function buildGradeSubmissionRows(records = gradeSubmissionRecordsCache, workloads = gradeSubmissionExpectedWorkloads()) {
+  const rowsByKey = new Map();
+  const legacyBuckets = new Map();
+  records.forEach((record) => {
+    if (isLegacyGradeSubmissionRecord(record)) {
+      const key = gradeSubmissionRecordKey(record);
+      if (!legacyBuckets.has(key)) legacyBuckets.set(key, []);
+      legacyBuckets.get(key).push(record);
+      return;
+    }
+    const row = normalizeGradeSubmissionRecordRow(record);
+    rowsByKey.set(row.key, row);
+  });
+  legacyBuckets.forEach((groupedRecords) => {
+    const row = normalizeGradeSubmissionRecordRow(groupedRecords[0], groupedRecords);
+    if (!rowsByKey.has(row.key)) rowsByKey.set(row.key, row);
+  });
+
+  activeGradeTerms().forEach((term) => {
+    workloads.forEach((workload) => {
+      const section = getSelectedClass(workload.sectionId);
+      const row = {
+        id: `expected:${gradeSubmissionWorkloadKey(workload, term)}`,
+        recordId: "",
+        recordIds: [],
+        batchId: "",
+        workloadId: workload.id || "",
+        schoolYear: section?.schoolYear || workload.schoolYear || "",
+        term,
+        quarter: term,
+        gradeLevel: workload.gradeLevel || section?.gradeLevel || "",
+        sectionId: workload.sectionId || "",
+        sectionName: workload.sectionName || (section ? classLabel(section) : ""),
+        subjectId: workload.subjectId || "",
+        subjectName: workload.subjectName || "Unspecified Subject",
+        subjectCategory: workload.subjectArea || "",
+        teacherUid: workload.teacherId || "",
+        teacherId: workload.teacherId || "",
+        teacherName: workload.teacherName || "Unspecified Teacher",
+        adviserId: section?.adviserId || "",
+        dueDate: "",
+        dateSubmitted: "",
+        submissionStatus: "Not Started",
+        grades: {},
+        encodedStudents: 0,
+        totalStudents: gradeSubmissionTotalStudents(workload.sectionId),
+        remarks: "",
+        createdBy: "",
+        createdByName: "",
+        createdAt: null,
+        updatedAt: null,
+        isLegacy: false,
+        isVirtual: true,
+      };
+      row.key = gradeSubmissionRowKey(row);
+      if (!rowsByKey.has(row.key)) rowsByKey.set(row.key, row);
+    });
+  });
+
+  return [...rowsByKey.values()].sort((a, b) =>
+    String(b.updatedAt || b.dateSubmitted || "").localeCompare(String(a.updatedAt || a.dateSubmitted || ""))
+    || a.schoolYear.localeCompare(b.schoolYear)
+    || a.term.localeCompare(b.term)
+    || a.gradeLevel.localeCompare(b.gradeLevel)
+    || a.sectionName.localeCompare(b.sectionName)
+    || a.subjectName.localeCompare(b.subjectName)
   );
+}
+
+function isGradeSubmissionComplied(status = "") {
+  return gradeSubmissionCompliedStatuses.includes(status);
+}
+
+function gradeSubmissionGradesMap(record = {}, groupedRecords = [record]) {
+  if (record.grades && typeof record.grades === "object" && !Array.isArray(record.grades)) return record.grades;
+  if (!groupedRecords.some(isLegacyGradeSubmissionRecord)) return {};
+  return groupedRecords.reduce((grades, item) => {
+    const studentId = item.studentId || item.lrn || item.id;
+    if (!studentId) return grades;
+    grades[studentId] = {
+      studentId,
+      lrn: item.lrn || "",
+      studentName: item.studentName || item.learnerName || "",
+      grade: item.grade ?? "",
+      remarks: item.remarks || "",
+    };
+    return grades;
+  }, {});
+}
+
+function gradeSubmissionTotalStudents(sectionId = "") {
+  return studentRecordsCache.filter((student) => student.sectionId === sectionId && isEnrolledStudentStatus(student.status)).length;
+}
+
+function gradeSubmissionEncodedCount(row = {}) {
+  if (row.isLegacy) return Number(row.legacyCount || Object.keys(row.grades || {}).length || 0);
+  return Object.values(row.grades || {}).filter((entry) => entry?.grade !== "" && entry?.grade !== null && entry?.grade !== undefined).length;
+}
+
+function gradeSubmissionDocId(workloadId = "", term = "") {
+  return [workloadId, term].map((part) => String(part || "").replace(/[^A-Za-z0-9_-]/g, "_")).join("__");
 }
 
 function gradeAverage(values) {
@@ -3970,13 +4251,13 @@ async function refreshGradeSubmissionCounters(role) {
     await getTaskVisibilitySettings();
     classRecordsCache = await getVisibleClasses();
     teacherWorkloadRecordsCache = await getVisibleTeacherWorkloadRecords();
-    studentRecordsCache = await getVisibleGradeTrackerStudents(teacherWorkloadRecordsCache);
+    classRecordsCache = mergeClassesWithWorkloadSections(classRecordsCache, teacherWorkloadRecordsCache);
+    studentRecordsCache = await getAssessmentVisibleStudents(classRecordsCache);
     gradeSubmissionRecordsCache = await getVisibleGradeSubmissions();
-    const sectionWorkloads = teacherWorkloadRecordsCache.filter((workload) => workload.sectionId);
-    const expected = sectionWorkloads.reduce((sum, workload) => sum + sectionActiveStudents(workload.sectionId).length * visibleTerms.length, 0);
-    const submitted = new Set(gradeSubmissionRecordsCache
-      .filter((record) => visibleTerms.includes(record.term))
-      .map((record) => `${record.workloadId}:${record.studentId}:${record.term}`)).size;
+    const rows = buildGradeSubmissionRows(gradeSubmissionRecordsCache, gradeSubmissionExpectedWorkloads())
+      .filter((row) => visibleTerms.includes(row.term));
+    const expected = rows.length;
+    const submitted = rows.filter((row) => isGradeSubmissionComplied(row.submissionStatus)).length;
     const pending = Math.max(expected - submitted, 0);
     updateCardValue("Grade Submission", `${formatGradeSubmissionPercent(submitted, expected)}/${formatGradeSubmissionPercent(pending, expected)}`);
     updateCardValue("Grades Submitted", formatGradeSubmissionPercent(submitted, expected));
@@ -4065,7 +4346,7 @@ function buildTeacherWorkloadSummaries() {
     const duties = ancillaryAssignmentRecordsCache.filter((record) => record.teacherId === teacher.id);
     const advisoryClasses = classRecordsCache.filter((section) => section.adviserId === teacher.id);
     const sections = [
-      ...teachingAssignments.map((record) => record.sectionName || record.sectionId).filter(Boolean),
+      ...teachingAssignments.map((record) => subjectGradeSectionClassLabel(record, "No section")).filter(Boolean),
       ...advisoryClasses.map(classLabel),
     ];
     const subjects = [...new Set(teachingAssignments.map((record) => record.subjectName).filter(Boolean))];
@@ -4179,6 +4460,19 @@ async function loadTeacherAttendancePersonnel() {
 
 function classLabel(record) {
   return `${record.gradeLevel || "Grade"} - ${record.sectionName || "Section"}`;
+}
+
+function gradeLevelShortLabel(gradeLevel = "") {
+  const value = String(gradeLevel || "").trim();
+  return value ? value.replace(/^Grade\s*/i, "").trim() || value : "Grade";
+}
+
+function subjectGradeSectionClassLabel(record = {}, fallbackSectionName = "Class") {
+  const section = record.sectionId ? getSelectedClass(record.sectionId) : null;
+  const subject = record.subjectName || record.subject || "Subject";
+  const grade = gradeLevelShortLabel(record.gradeLevel || section?.gradeLevel || "");
+  const sectionName = assessmentSectionOnlyLabel(record.sectionName || section?.sectionName || fallbackSectionName);
+  return `${subject} ${grade} - ${sectionName}`;
 }
 
 function activeClassOptions(selected = "", placeholder = "Select section") {
@@ -4368,10 +4662,10 @@ async function renderClassesModule() {
     <section class="module-panel compliance-toolbar">
       <div>
         <p class="eyebrow">Academic structure</p>
-        <h2>Class and Section Management</h2>
+        <h2>Section Management</h2>
       </div>
       <div class="toolbar-actions">
-        ${canManageClasses() ? `<button id="newClassButton" class="primary-button" type="button">Create Class</button>` : ""}
+        ${canManageClasses() ? `<button id="newClassButton" class="primary-button" type="button">Create Section</button>` : ""}
       </div>
     </section>
     <section id="lessonPlanAnalytics" class="attendance-analytics">
@@ -4421,7 +4715,7 @@ async function renderSchoolSetupModule() {
         <h2>Academic Setup</h2>
       </div>
       <div class="toolbar-actions">
-        ${canManageClasses() ? `<button id="setupNewClassButton" class="primary-button" type="button">Create Class / Section</button>` : ""}
+        ${canManageClasses() ? `<button id="setupNewClassButton" class="primary-button" type="button">Create Section</button>` : ""}
         ${canManageTeacherWorkload() ? `<button class="secondary-button setup-open-module" type="button" data-module="Teacher Workload">Manage Subjects</button>` : ""}
       </div>
     </section>
@@ -4431,7 +4725,7 @@ async function renderSchoolSetupModule() {
     <section class="setup-grid">
       <article class="table-card">
         <div class="section-header">
-          <div><p class="eyebrow">Class / section creation</p><h2>Sections by School Year</h2></div>
+          <div><p class="eyebrow">Section creation</p><h2>Sections by School Year</h2></div>
           ${canManageClasses() ? `<button class="secondary-button" id="setupCreateSectionButton" type="button">Add Section</button>` : ""}
         </div>
         <div id="setupSchoolYearsHost" class="table-wrap"><p class="empty-state">Loading sections...</p></div>
@@ -4489,7 +4783,7 @@ function renderSchoolSetupSummary() {
   const advisers = new Set(classRecordsCache.map((record) => record.adviserId).filter(Boolean));
   const subjects = new Set(schoolSubjectRecordsCache.filter((record) => (record.status || "active") === "active").map((record) => record.subjectName).filter(Boolean));
   document.querySelector("#schoolSetupSummary").innerHTML = renderAttendanceKpiGrid([
-    ["Active Sections", String(activeClasses.length), "Class / section records"],
+    ["Active Sections", String(activeClasses.length), "Section records"],
     ["School Years", String(schoolYears.length), schoolYears[0] || "No school year recorded"],
     ["Advisers Assigned", String(advisers.size), "Sections with assigned advisers"],
     ["Configured Subjects", String(subjects.size), canManageSchoolSubjects() ? "Available for workload setup" : "Managed by Principal"],
@@ -4537,9 +4831,7 @@ function renderSubjectMappingSetup() {
   const host = document.querySelector("#setupSubjectMappingHost");
   if (!host) return;
   const rows = [...schoolSubjectRecordsCache].sort((a, b) => {
-    const left = `${a.gradeLevel || ""} ${a.sectionName || ""} ${a.subjectName || ""}`;
-    const right = `${b.gradeLevel || ""} ${b.sectionName || ""} ${b.subjectName || ""}`;
-    return left.localeCompare(right);
+    return subjectLabel(a).localeCompare(subjectLabel(b));
   });
   if (!rows.length) {
     host.innerHTML = `<p class="empty-state">${canManageSchoolSubjects() ? "No subjects yet. Add subjects here before creating teacher workloads." : "Subject mapping is managed by the Principal."}</p>`;
@@ -4547,13 +4839,11 @@ function renderSubjectMappingSetup() {
   }
   host.innerHTML = `
     <table class="academic-table compact-table">
-      <thead><tr><th>Subject</th><th>Grade Level</th><th>Section</th><th>Hours</th><th>Status</th><th></th></tr></thead>
+      <thead><tr><th>Class</th><th>Hours</th><th>Status</th><th></th></tr></thead>
       <tbody>
         ${rows.map((row) => `
           <tr>
-            <td><strong>${escapeHtml(row.subjectName || "")}</strong><small class="row-note">${escapeHtml(row.subjectArea || "")}</small></td>
-            <td>${escapeHtml(row.gradeLevel)}</td>
-            <td>${escapeHtml(row.sectionName || "All sections")}</td>
+            <td><strong>${escapeHtml(subjectLabel(row))}</strong><small class="row-note">${escapeHtml(row.subjectArea || "")}</small></td>
             <td>${Number(row.weeklyHours || 0).toFixed(1)}</td>
             <td><span class="badge status-${statusClass(row.status || "active")}">${escapeHtml(row.status || "active")}</span></td>
             <td class="row-actions">
@@ -4647,7 +4937,7 @@ function renderAdviserSetupTable() {
   }
   host.innerHTML = `
     <table class="academic-table compact-table">
-      <thead><tr><th>Class / Section</th><th>School Year</th><th>Adviser</th><th>Learners</th><th></th></tr></thead>
+      <thead><tr><th>Section</th><th>School Year</th><th>Adviser</th><th>Learners</th><th></th></tr></thead>
       <tbody>
         ${advisoryRows.map((record) => `
           <tr>
@@ -4664,7 +4954,7 @@ function renderAdviserSetupTable() {
 }
 
 function subjectLabel(record) {
-  return [record.subjectName, record.gradeLevel, record.sectionName].filter(Boolean).join(" - ");
+  return subjectGradeSectionClassLabel(record, "All sections");
 }
 
 function openSchoolSubjectForm(record = null) {
@@ -4771,12 +5061,12 @@ function applyClassFilters() {
     gradeLevel: document.querySelector("#classGradeFilter")?.value || "",
   }));
   if (!filteredClassRecords.length) {
-    host.innerHTML = `<p class="empty-state">No classes or sections match the current filters.</p>`;
+    host.innerHTML = `<p class="empty-state">No sections match the current filters.</p>`;
     return;
   }
   host.innerHTML = `
     <table class="academic-table">
-      <thead><tr><th>Class</th><th>School Year</th><th>Adviser</th><th>Students</th><th>Status</th><th>Actions</th></tr></thead>
+      <thead><tr><th>Section</th><th>School Year</th><th>Adviser</th><th>Students</th><th>Status</th><th>Actions</th></tr></thead>
       <tbody>
         ${filteredClassRecords.map((record) => `
           <tr>
@@ -4805,7 +5095,7 @@ function openClassForm(record = null) {
     <div id="academicModal" class="modal-backdrop">
       <form id="classForm" class="modal">
         <div class="modal-header">
-          <div><p class="eyebrow">Classes / Sections</p><h2>${record ? "Edit Class" : "Create Class"}</h2></div>
+          <div><p class="eyebrow">Sections</p><h2>${record ? "Edit Section" : "Create Section"}</h2></div>
           <button class="icon-button close-academic-modal" type="button" aria-label="Close">x</button>
         </div>
         <div class="form-grid learner-form-grid">
@@ -4818,7 +5108,7 @@ function openClassForm(record = null) {
         <div id="academicFormMessage" class="message hidden" role="status"></div>
         <div class="modal-actions">
           <button class="secondary-button close-academic-modal" type="button">Cancel</button>
-          <button class="primary-button" type="submit">${record ? "Save Changes" : "Create Class"}</button>
+          <button class="primary-button" type="submit">${record ? "Save Changes" : "Create Section"}</button>
         </div>
       </form>
     </div>
@@ -6472,7 +6762,7 @@ function renderTeacherWorkloadTable(host) {
         <tr>
           <th>Teacher</th>
           <th>Subjects</th>
-          <th>Sections / Classes</th>
+          <th>Classes</th>
           <th>Adviser</th>
           <th>Teaching Load</th>
           <th>Ancillary Duties</th>
@@ -6533,14 +6823,13 @@ function renderTeacherWorkloadDetail(teacherId) {
     </div>
     <div class="workload-detail-grid">
       <article>
-        <h3>Subjects and Sections</h3>
+        <h3>Classes</h3>
         ${summary.teachingAssignments.length ? `
           <table class="compact-table">
-            <thead><tr><th>Subject</th><th>Section</th><th>Hours</th><th>Prep</th><th></th></tr></thead>
+            <thead><tr><th>Class</th><th>Hours</th><th>Prep</th><th></th></tr></thead>
             <tbody>${summary.teachingAssignments.map((record) => `
               <tr>
-                <td>${escapeHtml(record.subjectName || "")}<small class="row-note">${escapeHtml(record.subjectArea || "")}</small></td>
-                <td>${escapeHtml(record.sectionName || "Unassigned")}</td>
+                <td>${escapeHtml(subjectGradeSectionClassLabel(record, "No section"))}<small class="row-note">${escapeHtml(record.subjectArea || "")}</small></td>
                 <td>${Number(record.weeklyHours || 0).toFixed(1)}</td>
                 <td>${Number(record.preparations || 0)}</td>
                 <td class="row-actions">
@@ -6579,7 +6868,7 @@ function renderTeacherWorkloadDetail(teacherId) {
         <h3>Advisory Classes</h3>
         ${summary.advisoryClasses.length ? `
           <table class="compact-table">
-            <thead><tr><th>Class / Section</th><th>School Year</th><th>Hours</th><th></th></tr></thead>
+            <thead><tr><th>Section</th><th>School Year</th><th>Hours</th><th></th></tr></thead>
             <tbody>${summary.advisoryClasses.map((section) => `
               <tr>
                 <td>${escapeHtml(classLabel(section))}</td>
@@ -6701,6 +6990,7 @@ async function handleTeachingLoadFormSubmit(event) {
     subjectArea: subject.subjectArea || "",
     sectionId: section?.id || "",
     sectionName: section ? classLabel(section) : "",
+    schoolYear: section?.schoolYear || "",
     gradeLevel: section?.gradeLevel || document.querySelector("#workloadGradeLevel").value || subject.gradeLevel || "",
     weeklyHours,
     preparations: Number(document.querySelector("#workloadPreparations").value || 0),
@@ -6775,94 +7065,139 @@ async function removeTeacherWorkloadRecord(collectionName, recordId) {
 }
 
 async function renderGradeSubmissionModule() {
-  els.dashboardTitle.textContent = "Grade Submission Tracker";
+  const canEncode = ["Teacher", "Master Teacher", "Head Teacher"].includes(currentUserProfile.role);
+  const canMonitor = ["Principal", "Master Teacher", "Head Teacher"].includes(currentUserProfile.role);
+  els.dashboardTitle.textContent = "Grade Submission";
   els.dashboardContent.innerHTML = `
     <section class="module-panel compliance-toolbar">
       <div>
-        <p class="eyebrow">Grade monitoring</p>
-        <h2>Grade Submission Tracker</h2>
-      </div>
-      <div class="toolbar-actions">
-        ${["Teacher", "Master Teacher", "Head Teacher"].includes(currentUserProfile.role) ? `<button id="encodeGradeButton" class="primary-button" type="button">Encode Grades</button>` : ""}
+        <p class="eyebrow">Academic records</p>
+        <h2>Grade Submission</h2>
+        <p>Encode learner grades by assigned subject, grade level, section, school year, and term.</p>
       </div>
     </section>
+    ${canEncode ? `
+      <section class="table-card grade-encoding-section">
+        <div class="section-header">
+          <div><p class="eyebrow">Encode Grades</p><h2>My Assigned Classes</h2></div>
+        </div>
+        <div id="gradeEncodingCardsHost" class="grade-submission-card-grid"><p class="empty-state">Loading assigned classes...</p></div>
+      </section>
+    ` : ""}
     <section id="gradeTrackerAnalytics" class="attendance-analytics">
       <p class="empty-state">Loading grade analytics...</p>
     </section>
-    <section class="table-card">
-      <div class="section-header"><h2>Teacher Subject Loads</h2></div>
+    <section class="table-card ${canMonitor ? "" : "hidden"}">
+      <div class="section-header"><div><p class="eyebrow">Monitor Submissions</p><h2>Expected Class Grade Submissions</h2></div></div>
       <div class="filter-grid">
-        <label>Search<input id="gradeTrackerSearch" type="search" placeholder="Subject, teacher, section" /></label>
-        <label>Teacher<select id="gradeTeacherFilter"></select></label>
-        <label>Subject<select id="gradeSubjectFilter"></select></label>
+        <label>Search<input id="gradeTrackerSearch" type="search" placeholder="Section, subject, teacher, remarks" /></label>
+        <label>School Year<select id="gradeSchoolYearFilter"></select></label>
+        <label>Term / Quarter<select id="gradeTermFilter">${optionList(activeGradeTerms(), "", "All visible terms")}</select></label>
+        <label>Grade Level<select id="gradeLevelFilter"></select></label>
         <label>Section<select id="gradeSectionFilter"></select></label>
-        <label>Term<select id="gradeTermFilter">${optionList(activeGradeTerms(), "", "All visible terms")}</select></label>
+        <label>Subject<select id="gradeSubjectFilter"></select></label>
+        <label>Subject Teacher<select id="gradeTeacherFilter"></select></label>
+        <label>Status<select id="gradeStatusFilter">${optionList(gradeSubmissionStatusOptions, "", "All statuses")}</select></label>
       </div>
-      <div id="gradeTrackerTableHost" class="table-wrap"><p class="empty-state">Loading grade tracker...</p></div>
-    </section>
-    <section id="adviserGradeMatrixHost" class="table-card">
-      <p class="empty-state">Loading adviser grade matrix...</p>
+      <div id="gradeTrackerTableHost" class="table-wrap"><p class="empty-state">Loading grade submissions...</p></div>
     </section>
   `;
   try {
     await loadTeacherWorkloadTeachers();
     await getTaskVisibilitySettings();
     classRecordsCache = await getVisibleClasses();
-    teacherWorkloadRecordsCache = await getVisibleTeacherWorkloadRecords();
-    studentRecordsCache = await getVisibleGradeTrackerStudents(teacherWorkloadRecordsCache);
+    [teacherWorkloadRecordsCache, schoolSubjectRecordsCache] = await Promise.all([
+      getVisibleTeacherWorkloadRecords(),
+      getVisibleSchoolSubjects(),
+    ]);
+    classRecordsCache = mergeClassesWithWorkloadSections(classRecordsCache, teacherWorkloadRecordsCache);
+    studentRecordsCache = await getAssessmentVisibleStudents(classRecordsCache);
     gradeSubmissionRecordsCache = await getVisibleGradeSubmissions();
     populateGradeTrackerFilters();
     applyGradeTrackerFilters();
-    renderAdviserGradeMatrix();
+    renderGradeEncodingCards();
   } catch (error) {
     document.querySelector("#gradeTrackerTableHost").innerHTML = `<p class="empty-state">Unable to load grade tracker: ${escapeHtml(error.message)}</p>`;
+    const cardHost = document.querySelector("#gradeEncodingCardsHost");
+    if (cardHost) cardHost.innerHTML = `<p class="empty-state">Unable to load assigned classes: ${escapeHtml(error.message)}</p>`;
   }
 }
 
 function populateGradeTrackerFilters() {
-  document.querySelector("#gradeTeacherFilter").innerHTML = optionList(uniqueOptions(teacherWorkloadRecordsCache, "teacherName"), "", "All teachers");
-  syncGradeSubjectFilterOptions();
-  document.querySelector("#gradeSectionFilter").innerHTML = optionList(uniqueOptions(teacherWorkloadRecordsCache, "sectionName"), "", "All sections");
+  const rows = buildGradeSubmissionRows();
+  document.querySelector("#gradeSchoolYearFilter").innerHTML = optionList([...new Set(rows.map((row) => row.schoolYear).filter(Boolean))].sort(), "", "All years");
   document.querySelector("#gradeTermFilter").innerHTML = optionList(activeGradeTerms(), "", "All visible terms");
+  document.querySelector("#gradeLevelFilter").innerHTML = optionList([...new Set(rows.map((row) => row.gradeLevel).filter(Boolean))].sort(), "", "All grades");
+  document.querySelector("#gradeSectionFilter").innerHTML = optionList([...new Set(rows.map((row) => row.sectionName).filter(Boolean))].sort(), "", "All sections");
+  document.querySelector("#gradeSubjectFilter").innerHTML = optionList([...new Set(rows.map((row) => row.subjectName).filter(Boolean))].sort(), "", "All subjects");
+  document.querySelector("#gradeTeacherFilter").innerHTML = optionList([...new Set(rows.map((row) => row.teacherName).filter(Boolean))].sort(), "", "All teachers");
+  document.querySelector("#gradeStatusFilter").innerHTML = optionList(gradeSubmissionStatusOptions, "", "All statuses");
 }
 
-function syncGradeSubjectFilterOptions() {
-  const subjectFilter = document.querySelector("#gradeSubjectFilter");
-  if (!subjectFilter) return "";
-  const teacherName = document.querySelector("#gradeTeacherFilter")?.value || "";
-  const currentSubject = subjectFilter.value || "";
-  const assignedSubjects = uniqueOptions(
-    teacherWorkloadRecordsCache.filter((workload) =>
-      workload.sectionId
-      && (!teacherName || workload.teacherName === teacherName)
-    ),
-    "subjectName"
-  );
-  const selectedSubject = assignedSubjects.includes(currentSubject) ? currentSubject : "";
-  subjectFilter.innerHTML = optionList(
-    assignedSubjects,
-    selectedSubject,
-    teacherName ? "All assigned subjects" : "All subjects"
-  );
-  return selectedSubject;
+function renderGradeEncodingCards() {
+  const host = document.querySelector("#gradeEncodingCardsHost");
+  if (!host) return;
+  const rows = buildGradeSubmissionRows(
+    gradeSubmissionRecordsCache,
+    getGradeSubmissionEditableWorkloads()
+  ).filter((row) => row.teacherUid === auth.currentUser.uid || row.teacherId === auth.currentUser.uid);
+  if (!rows.length) {
+    host.innerHTML = `<p class="empty-state">No assigned teaching loads with sections are available for grade encoding.</p>`;
+    return;
+  }
+  host.innerHTML = rows.map((row) => `
+    <article class="grade-submission-card">
+      <div>
+        <span class="badge status-${statusClass(row.submissionStatus)}">${escapeHtml(row.submissionStatus)}</span>
+        <h3>${escapeHtml(row.subjectName || "Unspecified Subject")}</h3>
+        <p>${escapeHtml(row.gradeLevel || "No grade level")} - ${escapeHtml(row.sectionName || "No section")}</p>
+      </div>
+      <dl>
+        <div><dt>School Year</dt><dd>${escapeHtml(row.schoolYear || "Not recorded")}</dd></div>
+        <div><dt>Term / Quarter</dt><dd>${escapeHtml(row.term || "Not recorded")}</dd></div>
+        <div><dt>Encoded</dt><dd>${Number(row.encodedStudents || 0)} / ${Number(row.totalStudents || 0)}</dd></div>
+      </dl>
+      <button class="primary-button edit-grade-submission" type="button" data-row-key="${escapeAttribute(row.key)}" ${canEditGradeSubmissionRow(row) ? "" : "disabled"}>
+        ${row.submissionStatus === "Not Started" ? "Encode Grades" : row.submissionStatus === "Draft" || row.submissionStatus === "Returned" ? "Continue Encoding" : row.submissionStatus}
+      </button>
+    </article>
+  `).join("");
 }
 
 function applyGradeTrackerFilters() {
   const host = document.querySelector("#gradeTrackerTableHost");
   if (!host) return;
   const search = (document.querySelector("#gradeTrackerSearch")?.value || "").trim().toLowerCase();
-  const teacherName = document.querySelector("#gradeTeacherFilter")?.value || "";
-  const subjectName = syncGradeSubjectFilterOptions();
+  const schoolYear = document.querySelector("#gradeSchoolYearFilter")?.value || "";
+  const term = document.querySelector("#gradeTermFilter")?.value || "";
+  const gradeLevel = document.querySelector("#gradeLevelFilter")?.value || "";
   const sectionName = document.querySelector("#gradeSectionFilter")?.value || "";
+  const subjectName = document.querySelector("#gradeSubjectFilter")?.value || "";
+  const teacherName = document.querySelector("#gradeTeacherFilter")?.value || "";
+  const status = document.querySelector("#gradeStatusFilter")?.value || "";
 
-  filteredGradeWorkloads = teacherWorkloadRecordsCache.filter((workload) => {
-    const haystack = Object.values(workload).join(" ").toLowerCase();
-    return workload.sectionId
-      && (!search || haystack.includes(search))
-      && (!teacherName || workload.teacherName === teacherName)
-      && (!subjectName || workload.subjectName === subjectName)
-      && (!sectionName || workload.sectionName === sectionName);
+  filteredGradeSubmissionRows = buildGradeSubmissionRows().filter((row) => {
+    const haystack = [
+      row.schoolYear,
+      row.term,
+      row.gradeLevel,
+      row.sectionName,
+      row.subjectName,
+      subjectGradeSectionClassLabel(row, "No section"),
+      row.teacherName,
+      row.submissionStatus,
+      row.remarks,
+    ].filter(Boolean).join(" ").toLowerCase();
+    return (!search || haystack.includes(search))
+      && (!schoolYear || row.schoolYear === schoolYear)
+      && (!term || row.term === term)
+      && (!gradeLevel || row.gradeLevel === gradeLevel)
+      && (!sectionName || row.sectionName === sectionName)
+      && (!subjectName || row.subjectName === subjectName)
+      && (!teacherName || row.teacherName === teacherName)
+      && (!status || row.submissionStatus === status);
   });
+  filteredGradeSubmissionGroups = buildGradeSubmissionDisplayGroups(filteredGradeSubmissionRows);
 
   renderGradeTrackerAnalytics();
   renderGradeTrackerTables(host);
@@ -6871,239 +7206,374 @@ function applyGradeTrackerFilters() {
 function renderGradeTrackerAnalytics() {
   const host = document.querySelector("#gradeTrackerAnalytics");
   if (!host) return;
-  const selectedTerm = document.querySelector("#gradeTermFilter")?.value || "";
-  const terms = selectedTerm ? [selectedTerm] : activeGradeTerms();
-  const relevantWorkloadIds = new Set(filteredGradeWorkloads.map((workload) => workload.id));
-  const relevantRecords = gradeSubmissionRecordsCache.filter((record) => relevantWorkloadIds.has(record.workloadId) && terms.includes(record.term));
-  const totalExpected = filteredGradeWorkloads.reduce((sum, workload) => sum + sectionActiveStudents(workload.sectionId).length * terms.length, 0);
-  const submittedKeys = new Set(relevantRecords.map((record) => `${record.workloadId}:${record.studentId}:${record.term}`));
-  const submitted = submittedKeys.size;
-  const pending = Math.max(totalExpected - submitted, 0);
-  const average = gradeAverage(relevantRecords.map((record) => record.grade));
-  host.innerHTML = renderAttendanceKpiGrid([
-    ["Subject Loads", String(filteredGradeWorkloads.length), "From Teacher Workload"],
-    ["Grades Submitted", formatGradeSubmissionPercent(submitted, totalExpected), `${submitted} of ${totalExpected} expected term grades`],
-    ["Pending Grades", formatGradeSubmissionPercent(pending, totalExpected), `${pending} missing student-term entries`],
-    ["Average Grade", average ? average.toFixed(2) : "0.00", "Across visible submissions"],
-  ]);
-}
-
-function renderGradeTrackerTables(host) {
-  if (!filteredGradeWorkloads.length) {
-    host.innerHTML = `<p class="empty-state">No subject-section loads match the current filters.</p>`;
-    return;
-  }
-  host.innerHTML = filteredGradeWorkloads.map((workload) => renderTeacherSubjectGradeTable(workload)).join("");
-}
-
-function renderTeacherSubjectGradeTable(workload) {
-  const students = sectionActiveStudents(workload.sectionId);
-  const canEncode = canEncodeGradeForWorkload(workload);
-  return `
-    <article class="grade-subject-panel">
-      <div class="section-header">
-        <div>
-          <p class="eyebrow">${escapeHtml(workload.sectionName || "Section")}</p>
-          <h2>${escapeHtml(gradeWorkloadLabel(workload))}</h2>
-          <p>${escapeHtml(workload.teacherName || "")}</p>
-        </div>
-        ${canEncode ? `<button class="secondary-button encode-workload-grades" type="button" data-id="${escapeHtml(workload.id)}">Encode</button>` : ""}
-      </div>
-      ${students.length ? `
-        <table class="academic-table grade-subject-table">
-          <thead><tr><th>Name</th>${activeGradeTerms().map((term) => `<th>${escapeHtml(term)}</th>`).join("")}<th>Average</th></tr></thead>
-          <tbody>
-            ${students.map((student) => {
-              const grades = activeGradeTerms().map((term) => Number(getGradeRecord(workload.id, student.id, term)?.grade || 0));
-              const average = gradeAverage(grades);
-              return `
-                <tr>
-                  <td><strong>${escapeHtml(`${student.lastName}, ${student.firstName} ${student.middleName || ""}`.trim())}</strong></td>
-                  ${grades.map((grade) => `<td>${grade ? grade.toFixed(2) : `<span class="muted-mark">-</span>`}</td>`).join("")}
-                  <td><strong>${average ? average.toFixed(2) : "-"}</strong></td>
-                </tr>
-              `;
-            }).join("")}
-          </tbody>
-        </table>
-      ` : `<p class="empty-state">No active students found for this section.</p>`}
-    </article>
+  const rows = filteredGradeSubmissionRows;
+  const totalExpected = rows.length;
+  const submitted = rows.filter((row) => row.submissionStatus === "Submitted").length;
+  const notStarted = rows.filter((row) => row.submissionStatus === "Not Started").length;
+  const draft = rows.filter((row) => row.submissionStatus === "Draft").length;
+  const returned = rows.filter((row) => row.submissionStatus === "Returned").length;
+  const approved = rows.filter((row) => row.submissionStatus === "Approved").length;
+  const complied = rows.filter((row) => isGradeSubmissionComplied(row.submissionStatus)).length;
+  const compliancePercentage = totalExpected ? (complied / totalExpected) * 100 : 0;
+  const statusRows = gradeSubmissionStatusOptions.map((item) => [item, rows.filter((row) => row.submissionStatus === item).length]);
+  const sectionRows = gradeSubmissionComplianceRows(rows, (row) => row.sectionName);
+  const subjectRows = gradeSubmissionComplianceRows(rows, (row) => row.subjectName);
+  const teacherRows = gradeSubmissionComplianceRows(rows, (row) => row.teacherName);
+  const termRows = gradeSubmissionComplianceRows(rows, (row) => row.term)
+    .sort((a, b) => {
+      const order = new Map(termOptions.map((term, index) => [term, index]));
+      return (order.get(a[0]) ?? 99) - (order.get(b[0]) ?? 99) || String(a[0]).localeCompare(String(b[0]));
+    });
+  host.innerHTML = `
+    ${renderAttendanceKpiGrid([
+      ["Total Expected Grade Submissions", String(totalExpected), "Subject-section-teacher records"],
+      ["Submitted", String(submitted), "Marked Submitted"],
+      ["Not Started", String(notStarted), "No encoded draft yet"],
+      ["Draft", String(draft), "Saved but not submitted"],
+      ["Returned", String(returned), "Needs teacher revision"],
+      ["Approved", String(approved), "Approved grade submissions"],
+      ["Compliance Percentage", `${compliancePercentage.toFixed(1)}%`, `${complied} of ${totalExpected} complied`],
+    ])}
+    <div class="chart-grid attendance-chart-grid">
+      ${renderAnalyticsPieChart("Submission Status Distribution", statusRows)}
+      ${renderRateRows("Compliance by Section", sectionRows)}
+      ${renderRateRows("Compliance by Subject", subjectRows)}
+      ${renderRateRows("Compliance by Teacher", teacherRows)}
+      ${renderVerticalBarChart("Quarterly / Term Submission Trend", termRows)}
+    </div>
   `;
 }
 
-function renderAdviserGradeMatrix() {
-  const host = document.querySelector("#adviserGradeMatrixHost");
-  if (!host) return;
-  const adviserSections = currentUserProfile.role === "Teacher"
-    ? classRecordsCache.filter((section) => section.adviserId === auth.currentUser.uid)
-    : classRecordsCache.filter((section) => section.status !== "archived");
-  if (!adviserSections.length) {
-    host.innerHTML = `<p class="empty-state">No advisory sections available for grade matrix view.</p>`;
+function renderGradeTrackerTables(host) {
+  if (!filteredGradeSubmissionGroups.length) {
+    host.innerHTML = `<p class="empty-state">No grade submission records match the current filters.</p>`;
     return;
   }
-
-  host.innerHTML = adviserSections.map((section) => {
-    const sectionStudents = sectionActiveStudents(section.id);
-    const sectionWorkloads = teacherWorkloadRecordsCache.filter((workload) => workload.sectionId === section.id);
-    if (!sectionWorkloads.length) {
-      return `
-        <div class="section-header"><h2>${escapeHtml(classLabel(section))}</h2></div>
-        <p class="empty-state">No subject loads assigned to this section yet.</p>
-      `;
-    }
-    return `
-      <div class="section-header">
-        <div>
-          <p class="eyebrow">Adviser view</p>
-          <h2>${escapeHtml(classLabel(section))}</h2>
-        </div>
-      </div>
-      <div class="table-wrap">
-        <table class="academic-table adviser-grade-matrix">
-          <thead>
-            <tr>
-              <th rowspan="2">Name</th>
-              ${sectionWorkloads.map((workload) => `<th colspan="${activeGradeTerms().length}">${escapeHtml(gradeWorkloadLabel(workload))}</th>`).join("")}
-            </tr>
-            <tr>
-              ${sectionWorkloads.map(() => activeGradeTerms().map((term) => `<th>${escapeHtml(term.replace("Term ", "T"))}</th>`).join("")).join("")}
-            </tr>
-          </thead>
-          <tbody>
-            ${sectionStudents.map((student) => `
-              <tr>
-                <td><strong>${escapeHtml(`${student.lastName}, ${student.firstName} ${student.middleName || ""}`.trim())}</strong></td>
-                ${sectionWorkloads.map((workload) => activeGradeTerms().map((term) => {
-                  const grade = Number(getGradeRecord(workload.id, student.id, term)?.grade || 0);
-                  return `<td>${grade ? grade.toFixed(2) : `<span class="muted-mark">-</span>`}</td>`;
-                }).join("")).join("")}
-              </tr>
-            `).join("")}
-          </tbody>
-        </table>
-      </div>
-    `;
-  }).join("");
+  host.innerHTML = `
+    <table class="academic-table grade-submission-table">
+      <thead>
+        <tr>
+          <th>School Year</th>
+          <th>Term / Quarter</th>
+          <th>Class</th>
+          <th>Subject Teacher</th>
+          <th>Encoded Students</th>
+          <th>Date Submitted</th>
+          <th>Status</th>
+          <th>Remarks</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>${filteredGradeSubmissionGroups.map((group, index) => renderGradeSubmissionGroupRows(group, index)).join("")}</tbody>
+    </table>
+  `;
 }
 
-function openGradeSubmissionForm(workload = null) {
-  const encodableWorkloads = teacherWorkloadRecordsCache.filter(canEncodeGradeForWorkload);
-  const selectedWorkload = workload || encodableWorkloads[0];
-  const workloadOptions = encodableWorkloads
-    .map((item) => `<option value="${escapeHtml(item.id)}" ${item.id === selectedWorkload?.id ? "selected" : ""}>${escapeHtml(`${gradeWorkloadLabel(item)} - ${item.sectionName || "No section"}`)}</option>`)
-    .join("");
-  const hasWorkloads = encodableWorkloads.length > 0;
+function gradeSubmissionComplianceRows(rows, getter) {
+  const buckets = new Map();
+  rows.forEach((row) => {
+    const label = String(getter(row) || "Not recorded").trim() || "Not recorded";
+    if (!buckets.has(label)) buckets.set(label, []);
+    buckets.get(label).push(row);
+  });
+  return [...buckets.entries()]
+    .map(([label, groupRows]) => {
+      const complied = groupRows.filter((row) => isGradeSubmissionComplied(row.submissionStatus)).length;
+      const rate = groupRows.length ? (complied / groupRows.length) * 100 : 0;
+      return [label, Number(rate.toFixed(1)), `${complied}/${groupRows.length} complied`];
+    })
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, 10);
+}
+
+function buildGradeSubmissionDisplayGroups(rows = []) {
+  const batchCounts = rows.reduce((totals, row) => {
+    if (row.batchId) totals.set(row.batchId, (totals.get(row.batchId) || 0) + 1);
+    return totals;
+  }, new Map());
+  const groups = new Map();
+  rows.forEach((row) => {
+    const groupId = row.batchId && batchCounts.get(row.batchId) > 1 ? `batch:${row.batchId}` : `row:${row.key}`;
+    if (!groups.has(groupId)) {
+      groups.set(groupId, { id: groupId, rows: [], isBatch: groupId.startsWith("batch:") });
+    }
+    groups.get(groupId).rows.push(row);
+  });
+  return [...groups.values()];
+}
+
+function renderGradeSubmissionGroupRows(group, index) {
+  if (!group.isBatch) return renderGradeSubmissionRecordRow(group.rows[0]);
+  const rows = group.rows;
+  const first = rows[0] || {};
+  const complied = rows.filter((row) => isGradeSubmissionComplied(row.submissionStatus)).length;
+  const rate = rows.length ? (complied / rows.length) * 100 : 0;
+  const targetId = `gradeSubmissionGroupDetails${index}`;
+  return `
+    <tr class="assessment-group-row grade-submission-group-row" data-target="${targetId}" tabindex="0">
+      <td>${escapeHtml(first.schoolYear || "Mixed")}</td>
+      <td><strong>${escapeHtml(first.term || "Multiple")}</strong></td>
+      <td><strong>Bulk grade submission</strong><small class="row-note">${rows.length} class-teacher records</small></td>
+      <td>${escapeHtml(first.teacherName || "Multiple teachers")}</td>
+      <td>${rows.reduce((sum, row) => sum + Number(row.encodedStudents || 0), 0)} / ${rows.reduce((sum, row) => sum + Number(row.totalStudents || 0), 0)}</td>
+      <td>${escapeHtml(first.dateSubmitted || "Not submitted")}</td>
+      <td><strong>${rate.toFixed(1)}%</strong><small class="row-note">${complied}/${rows.length} complied</small></td>
+      <td>${escapeHtml(first.remarks || "")}</td>
+      <td><button class="secondary-button" type="button">Expand</button></td>
+    </tr>
+    <tr id="${targetId}" class="assessment-group-details hidden">
+      <td colspan="9">
+        <div class="table-wrap">
+          <table class="compact-table">
+            <thead><tr><th>Class</th><th>Subject Teacher</th><th>Encoded</th><th>Status</th><th>Date Submitted</th><th>Remarks</th><th></th></tr></thead>
+            <tbody>${rows.map((row) => `
+              <tr>
+                <td>${escapeHtml(subjectGradeSectionClassLabel(row, "No section"))}</td>
+                <td>${escapeHtml(row.teacherName || "Unspecified Teacher")}</td>
+                <td>${Number(row.encodedStudents || 0)} / ${Number(row.totalStudents || 0)}</td>
+                <td>${gradeSubmissionStatusBadge(row.submissionStatus)}</td>
+                <td>${escapeHtml(row.dateSubmitted || "Not submitted")}</td>
+                <td>${escapeHtml(row.remarks || "")}</td>
+                <td class="row-actions">${gradeSubmissionActionButton(row)}</td>
+              </tr>
+            `).join("")}</tbody>
+          </table>
+        </div>
+      </td>
+    </tr>
+  `;
+}
+
+function renderGradeSubmissionRecordRow(row) {
+  return `
+    <tr>
+      <td>${escapeHtml(row.schoolYear || "Not recorded")}</td>
+      <td>${escapeHtml(row.term || "Not recorded")}</td>
+      <td><strong>${escapeHtml(subjectGradeSectionClassLabel(row, "No section"))}</strong>${row.isLegacy ? `<small class="row-note">Legacy grade entries</small>` : ""}</td>
+      <td>${escapeHtml(row.teacherName || "Unspecified Teacher")}</td>
+      <td>${Number(row.encodedStudents || 0)} / ${Number(row.totalStudents || 0)}</td>
+      <td>${escapeHtml(row.dateSubmitted || "Not submitted")}</td>
+      <td>${gradeSubmissionStatusBadge(row.submissionStatus)}</td>
+      <td>${escapeHtml(row.remarks || "")}</td>
+      <td class="row-actions">${gradeSubmissionActionButton(row)}</td>
+    </tr>
+  `;
+}
+
+function gradeSubmissionStatusBadge(status = "Not Started") {
+  return `<span class="badge status-${statusClass(status)}">${escapeHtml(status)}</span>`;
+}
+
+function gradeSubmissionActionButton(row) {
+  if (!canEditGradeSubmissionRow(row)) return "";
+  const label = row.submissionStatus === "Not Started" ? "Encode Grades" : "Continue";
+  return `<button class="secondary-button edit-grade-submission" type="button" data-row-key="${escapeAttribute(row.key)}">${label}</button>`;
+}
+
+function canEditGradeSubmissionRow(row = {}) {
+  return ["Teacher", "Master Teacher", "Head Teacher"].includes(currentUserProfile?.role)
+    && (row.teacherUid || row.teacherId) === auth.currentUser.uid
+    && ["Not Started", "Draft", "Returned"].includes(row.submissionStatus || "Not Started");
+}
+
+function isGradeSubmissionOverdue(row = {}) {
+  return Boolean(row.dueDate && row.dueDate < todayIso() && !isGradeSubmissionComplied(row.submissionStatus));
+}
+
+function getGradeSubmissionEditableWorkloads() {
+  if (!["Teacher", "Master Teacher", "Head Teacher"].includes(currentUserProfile?.role)) return [];
+  return teacherWorkloadRecordsCache
+    .filter((workload) => workload.sectionId && workload.teacherId === auth.currentUser.uid)
+    .sort((a, b) => assessmentWorkloadLabel(a).localeCompare(assessmentWorkloadLabel(b)));
+}
+
+function findGradeSubmissionRowByKey(key = "") {
+  return buildGradeSubmissionRows().find((row) => row.key === key) || filteredGradeSubmissionRows.find((row) => row.key === key) || null;
+}
+
+function openGradeSubmissionForm(source = null) {
+  const row = source?.key ? source : null;
+  const workload = source?.sectionId && source?.subjectName && !source.key ? source : teacherWorkloadRecordsCache.find((item) => item.id === row?.workloadId);
+  const initial = initialGradeSubmissionFormData(row, workload);
+  const students = gradeSubmissionStudentsForSection(initial.sectionId);
+  const existingGrades = initial.grades || {};
+  editingGradeSubmissionId = row?.recordId || "";
+  editingGradeSubmissionRowKey = row?.key || "";
   els.dashboardContent.insertAdjacentHTML("beforeend", `
     <div id="academicModal" class="modal-backdrop">
       <form id="gradeSubmissionForm" class="modal wide-modal">
         <div class="modal-header">
-          <div><p class="eyebrow">Grade Submission</p><h2>Encode Subject Grades</h2></div>
+          <div><p class="eyebrow">Grade Encoding</p><h2>${initial.subjectName || "Encode Grades"}</h2></div>
           <button class="icon-button close-academic-modal" type="button" aria-label="Close">x</button>
         </div>
-        <div class="form-grid learner-form-grid">
-          <label>Subject and Section<select id="gradeWorkloadId" required>${workloadOptions}</select></label>
-          <label>Term<select id="gradeSubmissionTerm" required>${optionList(activeGradeTerms(), "", "Select term")}</select></label>
+        <div class="grade-encoding-summary">
+          <div><span>Subject</span><strong>${escapeHtml(initial.subjectName || "Unspecified Subject")}</strong></div>
+          <div><span>Grade / Section</span><strong>${escapeHtml(initial.gradeLevel || "No grade")} - ${escapeHtml(initial.sectionName || "No section")}</strong></div>
+          <div><span>School Year</span><strong>${escapeHtml(initial.schoolYear || "Not recorded")}</strong></div>
+          <div><span>Term / Quarter</span><strong>${escapeHtml(initial.term || "Not recorded")}</strong></div>
+          <div><span>Teacher</span><strong>${escapeHtml(initial.teacherName || "Unspecified Teacher")}</strong></div>
+          <div><span>Status</span><strong>${escapeHtml(initial.submissionStatus || "Not Started")}</strong></div>
         </div>
-        <div id="gradeSubmissionRows" class="batch-table-host"><p class="empty-state">${hasWorkloads ? "Select a subject-section and term." : "No assigned subject-section loads are available for grade encoding."}</p></div>
+        <input type="hidden" id="gradeSubmissionWorkloadId" value="${escapeAttribute(initial.workloadId)}" />
+        <input type="hidden" id="gradeSubmissionTerm" value="${escapeAttribute(initial.term)}" />
+        <label class="modal-field">Submission Remarks<textarea id="gradeSubmissionRemarks" rows="3">${escapeHtml(initial.remarks)}</textarea></label>
+        <div class="table-wrap">
+          <table class="academic-table grade-entry-table grade-encoding-table">
+            <thead><tr><th>No.</th><th>Student Name</th><th>Grade</th></tr></thead>
+            <tbody>
+              ${students.length ? students.map((student, index) => {
+                const gradeEntry = existingGrades[student.id] || existingGrades[student.lrn] || {};
+                return `
+                  <tr>
+                    <td>${index + 1}</td>
+                    <td><strong>${escapeHtml(studentFullName(student) || student.learnerName || "Unnamed student")}</strong></td>
+                    <td><input class="grade-entry-input grade-submission-grade-input" data-student-id="${escapeAttribute(student.id)}" type="number" min="0" max="100" step="1" inputmode="numeric" autocomplete="off" value="${escapeAttribute(gradeEntry.grade ?? "")}" /></td>
+                  </tr>
+                `;
+              }).join("") : `<tr><td colspan="3"><p class="empty-state">No active students are enrolled in this section yet.</p></td></tr>`}
+            </tbody>
+          </table>
+        </div>
         <div id="academicFormMessage" class="message hidden" role="status"></div>
         <div class="modal-actions">
-          <button class="secondary-button close-academic-modal" type="button">Cancel</button>
-          <button class="primary-button" type="submit" ${hasWorkloads ? "" : "disabled"}>Save Grades</button>
+          <button class="secondary-button close-academic-modal" type="button">Cancel / Back</button>
+          <button class="secondary-button" type="submit" name="gradeSubmissionAction" value="draft">Save Draft</button>
+          <button class="primary-button" type="submit" name="gradeSubmissionAction" value="submit">Submit Grades</button>
         </div>
       </form>
     </div>
   `);
-  renderGradeSubmissionRows();
 }
 
-function renderGradeSubmissionRows() {
-  const workloadId = document.querySelector("#gradeWorkloadId")?.value || "";
-  const term = document.querySelector("#gradeSubmissionTerm")?.value || "";
-  const host = document.querySelector("#gradeSubmissionRows");
-  if (!host) return;
-  const workload = teacherWorkloadRecordsCache.find((item) => item.id === workloadId);
-  if (!workload || !term) {
-    host.innerHTML = `<p class="empty-state">Select a subject-section and term.</p>`;
-    return;
-  }
-  const students = sectionActiveStudents(workload.sectionId);
-  if (!students.length) {
-    host.innerHTML = `<p class="empty-state">No active students found for this section.</p>`;
-    return;
-  }
-  host.innerHTML = `
-    <div class="table-wrap">
-      <table class="batch-table grade-entry-table">
-        <thead><tr><th>Name</th><th>${escapeHtml(term)} Grade</th></tr></thead>
-        <tbody>
-          ${students.map((student) => {
-            const existing = getGradeRecord(workload.id, student.id, term);
-            return `
-              <tr>
-                <td><strong>${escapeHtml(`${student.lastName}, ${student.firstName} ${student.middleName || ""}`.trim())}</strong></td>
-                <td><input class="grade-entry-input" data-student-id="${escapeHtml(student.id)}" type="number" min="0" max="100" step="0.01" value="${escapeHtml(existing?.grade ?? "")}" /></td>
-              </tr>
-            `;
-          }).join("")}
-        </tbody>
-      </table>
-    </div>
-  `;
+function initialGradeSubmissionFormData(row = null, workload = null) {
+  const section = getSelectedClass(row?.sectionId || workload?.sectionId || "");
+  const selectedWorkload = workload || teacherWorkloadRecordsCache.find((item) => item.id === row?.workloadId);
+  const teacherUid = row?.teacherUid || selectedWorkload?.teacherId || auth.currentUser?.uid || "";
+  const teacher = academicTeachersCache.find((item) => item.id === teacherUid);
+  return {
+    workloadId: selectedWorkload?.id || row?.workloadId || "",
+    schoolYear: row?.schoolYear || section?.schoolYear || selectedWorkload?.schoolYear || "",
+    term: row?.term || activeGradeTerms()[0] || "",
+    gradeLevel: row?.gradeLevel || selectedWorkload?.gradeLevel || section?.gradeLevel || "",
+    sectionId: row?.sectionId || selectedWorkload?.sectionId || "",
+    sectionName: row?.sectionName || selectedWorkload?.sectionName || (section ? classLabel(section) : ""),
+    subjectName: row?.subjectName || selectedWorkload?.subjectName || "",
+    subjectId: row?.subjectId || selectedWorkload?.subjectId || "",
+    subjectArea: row?.subjectArea || selectedWorkload?.subjectArea || "",
+    subjectCategory: row?.subjectCategory || selectedWorkload?.subjectArea || "",
+    teacherUid,
+    teacherName: row?.teacherName || selectedWorkload?.teacherName || teacher?.fullName || currentUserProfile?.fullName || auth.currentUser?.email || "",
+    submissionStatus: row?.submissionStatus || "Not Started",
+    dateSubmitted: row?.dateSubmitted || "",
+    remarks: row?.remarks || "",
+    grades: row?.grades || {},
+  };
+}
+
+function gradeSubmissionStudentsForSection(sectionId = "") {
+  return sortStudentsSf1Order(studentRecordsCache.filter((student) => student.sectionId === sectionId && isEnrolledStudentStatus(student.status)));
+}
+
+function syncGradeSubmissionFormFields() {
+  return null;
 }
 
 async function handleGradeSubmissionFormSubmit(event) {
   event.preventDefault();
   const message = document.querySelector("#academicFormMessage");
-  const workload = teacherWorkloadRecordsCache.find((item) => item.id === document.querySelector("#gradeWorkloadId").value);
-  const term = document.querySelector("#gradeSubmissionTerm").value;
-  if (!workload || !canEncodeGradeForWorkload(workload) || !term) {
-    message.textContent = "Select one of your assigned subject-section loads and a term.";
+  const action = event.submitter?.value || "draft";
+  const workloadId = document.querySelector("#gradeSubmissionWorkloadId")?.value || "";
+  const workload = teacherWorkloadRecordsCache.find((item) => item.id === workloadId);
+  const row = findGradeSubmissionRowByKey(editingGradeSubmissionRowKey) || buildGradeSubmissionRows().find((item) => item.workloadId === workloadId && item.term === document.querySelector("#gradeSubmissionTerm")?.value);
+  const initial = initialGradeSubmissionFormData(row, workload);
+  const section = getSelectedClass(initial.sectionId);
+  const students = gradeSubmissionStudentsForSection(initial.sectionId);
+  const term = document.querySelector("#gradeSubmissionTerm")?.value || "";
+  const submissionStatus = action === "submit" ? "Submitted" : "Draft";
+  if (!workload || !section || !term || workload.teacherId !== auth.currentUser.uid) {
+    message.textContent = "You can only encode grades for your own assigned teaching loads.";
     message.classList.add("error");
     message.classList.remove("hidden");
     return;
   }
-  const section = getSelectedClass(workload.sectionId);
-  const students = sectionActiveStudents(workload.sectionId);
+  if (row?.submissionStatus === "Approved") {
+    message.textContent = "Approved grade submissions can no longer be edited.";
+    message.classList.add("error");
+    message.classList.remove("hidden");
+    return;
+  }
+  const grades = {};
+  const invalidRows = [];
+  students.forEach((student) => {
+    const gradeInput = document.querySelector(`.grade-submission-grade-input[data-student-id="${CSS.escape(student.id)}"]`);
+    const rawGrade = String(gradeInput?.value || "").trim();
+    const numericGrade = rawGrade === "" ? "" : Number(rawGrade);
+    if (rawGrade !== "" && numericGrade !== 0 && (!Number.isFinite(numericGrade) || numericGrade < 60 || numericGrade > 100)) {
+      invalidRows.push(studentFullName(student) || student.lrn || student.id);
+    }
+    grades[student.id] = {
+      studentId: student.id,
+      lrn: student.lrn || "",
+      studentName: studentFullName(student) || student.learnerName || "",
+      grade: numericGrade,
+      remarks: "",
+    };
+  });
+  if (action === "submit" && !students.length) {
+    invalidRows.push("No active students in this section");
+  }
+  if (invalidRows.length) {
+    message.textContent = action === "submit"
+      ? `Submit requires grades to be blank, 0, or from 60 to 100. Check: ${invalidRows.slice(0, 4).join(", ")}${invalidRows.length > 4 ? "..." : ""}`
+      : `Grades must be blank, 0, or from 60 to 100. Check: ${invalidRows.slice(0, 4).join(", ")}${invalidRows.length > 4 ? "..." : ""}`;
+    message.classList.add("error");
+    message.classList.remove("hidden");
+    return;
+  }
+  const recordId = editingGradeSubmissionId || gradeSubmissionDocId(workload.id, term);
+  const recordRef = doc(db, "gradeSubmissions", recordId);
+  let existing = editingGradeSubmissionId ? gradeSubmissionRecordsCache.find((record) => record.id === editingGradeSubmissionId) : null;
+  const submissionSchoolYear = section.schoolYear || workload.schoolYear || initial.schoolYear || students.find((student) => student.schoolYear)?.schoolYear || "";
+  if (!submissionSchoolYear) {
+    message.textContent = "Save failed: School year is missing for this section. Ask an administrator to update the class or teaching load school year.";
+    message.classList.add("error");
+    message.classList.remove("hidden");
+    return;
+  }
+  const data = {
+    workloadId: workload.id,
+    teacherId: workload.teacherId,
+    teacherUid: workload.teacherId,
+    teacherName: workload.teacherName || currentUserProfile.fullName || auth.currentUser.email,
+    schoolYear: submissionSchoolYear,
+    term,
+    quarter: term,
+    gradeLevel: workload.gradeLevel || section.gradeLevel || "",
+    sectionId: section.id,
+    sectionName: classLabel(section),
+    subjectId: workload.subjectId || "",
+    subjectName: workload.subjectName || initial.subjectName || "Unspecified Subject",
+    subjectArea: workload.subjectArea || initial.subjectArea || "",
+    subjectCategory: workload.subjectArea || initial.subjectCategory || "",
+    submissionStatus,
+    dateSubmitted: action === "submit" ? todayIso() : existing?.dateSubmitted || "",
+    remarks: document.querySelector("#gradeSubmissionRemarks")?.value.trim() || "",
+    grades,
+    createdBy: existing?.createdBy || auth.currentUser.uid,
+    createdByName: existing?.createdByName || currentUserProfile.fullName || auth.currentUser.email,
+  };
   try {
-    let saved = 0;
-    for (const student of students) {
-      const input = document.querySelector(`.grade-entry-input[data-student-id="${CSS.escape(student.id)}"]`);
-      if (!input || input.value === "") continue;
-      const grade = Number(input.value);
-      if (!Number.isFinite(grade) || grade < 0 || grade > 100) {
-        throw new Error(`Grade for ${student.lastName}, ${student.firstName} must be from 0 to 100.`);
-      }
-      const existing = getGradeRecord(workload.id, student.id, term);
-      const data = {
-        workloadId: workload.id,
-        teacherId: workload.teacherId,
-        teacherName: workload.teacherName || currentUserProfile.fullName || auth.currentUser.email,
-        subjectName: workload.subjectName || "",
-        subjectArea: workload.subjectArea || "",
-        sectionId: workload.sectionId || "",
-        sectionName: workload.sectionName || "",
-        gradeLevel: workload.gradeLevel || section?.gradeLevel || "",
-        schoolYear: section?.schoolYear || "",
-        adviserId: section?.adviserId || "",
-        studentId: student.id,
-        studentName: `${student.lastName}, ${student.firstName}`,
-        term,
-        grade,
-        encodedBy: auth.currentUser.uid,
-        encodedByName: currentUserProfile.fullName || auth.currentUser.email,
-      };
-      if (existing) {
-        await updateDoc(doc(db, "gradeSubmissions", existing.id), { ...data, updatedAt: serverTimestamp() });
-        await createAuditLog("update", "Grade Submission Tracker", existing.id, existing, data);
-      } else {
-        const created = await addDoc(collection(db, "gradeSubmissions"), { ...data, createdAt: serverTimestamp(), updatedAt: serverTimestamp() });
-        await createAuditLog("create", "Grade Submission Tracker", created.id, null, data);
-      }
-      saved += 1;
+    if (existing) {
+      await setDoc(recordRef, { ...data, createdAt: existing.createdAt || serverTimestamp(), updatedAt: serverTimestamp() }, { merge: false });
+      await createAuditLog("update", "Grade Submission", recordId, existing, data);
+    } else {
+      await setDoc(recordRef, { ...data, createdAt: serverTimestamp(), updatedAt: serverTimestamp() });
+      await createAuditLog("create", "Grade Submission", recordId, null, data);
     }
     document.querySelector("#academicModal")?.remove();
     await renderGradeSubmissionModule();
-    showDashboardMessage(`Saved ${saved} grade entr${saved === 1 ? "y" : "ies"}.`);
+    await refreshGradeSubmissionCounters(currentUserProfile.role);
+    showDashboardMessage(action === "submit" ? "Grades submitted." : "Grade draft saved.");
   } catch (error) {
     message.textContent = `Save failed: ${error.message}`;
     message.classList.add("error");
@@ -7180,6 +7650,7 @@ function applyLessonPlanFilters() {
       record.subjectName,
       record.sectionName,
       record.gradeLevel,
+      subjectGradeSectionClassLabel(record),
       record.term,
       record.weekNumber ? `Week ${record.weekNumber}` : "",
       record.weekStart,
@@ -7242,6 +7713,7 @@ function renderPrincipalLessonPlanMonitoring() {
       workload.subjectName,
       workload.sectionName,
       workload.gradeLevel,
+      subjectGradeSectionClassLabel(workload),
       term,
       weekNumber ? `Week ${weekNumber}` : "",
     ].filter(Boolean).join(" ").toLowerCase();
@@ -7257,6 +7729,7 @@ function renderPrincipalLessonPlanMonitoring() {
         record.subjectName,
         record.sectionName,
         record.gradeLevel,
+        subjectGradeSectionClassLabel(record),
         record.term,
         record.weekNumber ? `Week ${record.weekNumber}` : "",
         record.submissionType,
@@ -7269,7 +7742,7 @@ function renderPrincipalLessonPlanMonitoring() {
   if (missingHost) {
     missingHost.innerHTML = missingRows.length ? `
     <table class="compliance-table">
-      <thead><tr><th>Teacher</th><th>Subject / Section</th><th>Missing Week</th><th>Status</th></tr></thead>
+      <thead><tr><th>Teacher</th><th>Class</th><th>Missing Week</th><th>Status</th></tr></thead>
       <tbody>
         ${missingRows.map(({ workload, term, weekNumber }) => `
           <tr>
@@ -7277,28 +7750,25 @@ function renderPrincipalLessonPlanMonitoring() {
               ${escapeHtml(workload.teacherName || "Teacher")}
               <small class="row-note">${escapeHtml(workload.department || workload.subjectArea || "")}</small>
             </td>
-            <td>
-              <strong>${escapeHtml(workload.subjectName || "Subject")}</strong>
-              <small class="row-note">${escapeHtml(workload.sectionName || "Section")}</small>
-            </td>
+            <td><strong>${escapeHtml(subjectGradeSectionClassLabel(workload))}</strong></td>
             <td>${escapeHtml(term)} - Week ${escapeHtml(weekNumber)}</td>
             <td><span class="badge status-not-submitted">Not Submitted</span></td>
           </tr>
         `).join("")}
       </tbody>
     </table>
-  ` : `<p class="empty-state">All visible subject-section weeks have lesson plan submissions.</p>`;
+  ` : `<p class="empty-state">All visible class weeks have lesson plan submissions.</p>`;
   }
 
   if (uncheckedHost) {
     uncheckedHost.innerHTML = uncheckedRows.length ? `
     <table class="compliance-table">
-      <thead><tr><th>Teacher</th><th>Subject / Section</th><th>Week</th><th>Submission</th><th>Action</th></tr></thead>
+      <thead><tr><th>Teacher</th><th>Class</th><th>Week</th><th>Submission</th><th>Action</th></tr></thead>
       <tbody>
         ${uncheckedRows.map((record) => `
           <tr>
             <td>${escapeHtml(record.teacherName || "Teacher")}<small class="row-note">${escapeHtml(record.teacherRole || "")}</small></td>
-            <td><strong>${escapeHtml(record.subjectName || "Subject")}</strong><small class="row-note">${escapeHtml(record.sectionName || "Section")}</small></td>
+            <td><strong>${escapeHtml(subjectGradeSectionClassLabel(record))}</strong></td>
             <td>${escapeHtml(record.term || "")} - Week ${escapeHtml(record.weekNumber || "")}<small class="row-note">${escapeHtml(record.weekStart || "")}</small></td>
             <td>${escapeHtml(record.submissionType || "Submitted")}<small class="row-note">${record.fileLink ? `<a href="${escapeHtml(record.fileLink)}" target="_blank" rel="noopener">Open DLL</a>` : "Hard copy / no link"}</small></td>
             <td><button class="secondary-button review-lesson-plan" type="button" data-id="${escapeHtml(record.id)}">Review</button></td>
@@ -7322,7 +7792,7 @@ function renderLessonPlanAnalytics() {
   const unchecked = visibleRecords.filter((record) => record.status === "Submitted").length;
   host.innerHTML = `
     ${renderAttendanceKpiGrid([
-      ["Submitted DLLs", String(submitted), `${expected} expected subject-week submissions`],
+      ["Submitted DLLs", String(submitted), `${expected} expected class-week submissions`],
       ["Pending DLLs", String(Math.max(expected - submitted, 0)), "Based on Principal visibility"],
       ["Unchecked", String(unchecked), "Submitted but not yet checked"],
       ["Reviewed", String(reviewed), "Noted or confirmed submissions"],
@@ -7344,7 +7814,7 @@ function renderLessonPlanTable(host) {
       <thead>
         <tr>
           <th>Teacher</th>
-          <th>Subject / Section</th>
+          <th>Class</th>
           <th>Week</th>
           <th>Submission</th>
           <th>Status</th>
@@ -7371,10 +7841,7 @@ function renderLessonPlanRow(record) {
         ${escapeHtml(record.teacherName || "Teacher")}
         <small class="row-note">${escapeHtml(record.teacherRole || "")}</small>
       </td>
-      <td>
-        <strong>${escapeHtml(record.subjectName || "Subject")}</strong>
-        <small class="row-note">${escapeHtml(record.sectionName || "Section")}</small>
-      </td>
+      <td><strong>${escapeHtml(subjectGradeSectionClassLabel(record))}</strong></td>
       <td>
         ${escapeHtml(record.term || "Term not set")} ${record.weekNumber ? `- Week ${escapeHtml(record.weekNumber)}` : ""}
         <small class="row-note">${escapeHtml(record.weekStart || "No date")}</small>
@@ -7404,7 +7871,7 @@ function openLessonPlanForm(record = null) {
   const encodableWorkloads = teacherWorkloadRecordsCache.filter(canSubmitLessonPlanForWorkload);
   const selectedWorkload = encodableWorkloads.find((workload) => workload.id === record?.workloadId) || encodableWorkloads[0];
   const workloadOptions = encodableWorkloads
-    .map((item) => `<option value="${escapeHtml(item.id)}" ${item.id === selectedWorkload?.id ? "selected" : ""}>${escapeHtml(`${gradeWorkloadLabel(item)} - ${item.sectionName || "No section"}`)}</option>`)
+    .map((item) => `<option value="${escapeHtml(item.id)}" ${item.id === selectedWorkload?.id ? "selected" : ""}>${escapeHtml(gradeWorkloadLabel(item))}</option>`)
     .join("");
   const hasWorkloads = encodableWorkloads.length > 0;
   els.dashboardContent.insertAdjacentHTML("beforeend", `
@@ -7415,14 +7882,14 @@ function openLessonPlanForm(record = null) {
           <button class="icon-button close-academic-modal" type="button" aria-label="Close">x</button>
         </div>
         <div class="form-grid learner-form-grid">
-          <label>Subject and Section<select id="lessonPlanWorkloadId" required>${workloadOptions}</select></label>
+          <label>Class<select id="lessonPlanWorkloadId" required>${workloadOptions}</select></label>
           <label>Term<select id="lessonPlanTerm" required>${optionList([...new Set(lessonPlanWeekOptions.filter((item) => activeLessonPlanWeeks().includes(item.key)).map((item) => item.term))], record?.term || "", "Select term")}</select></label>
           <label>Week<select id="lessonPlanWeekNumber" required></select></label>
           <label>Week Start<input id="lessonPlanWeekStart" type="date" required value="${escapeHtml(record?.weekStart || todayIso())}" /></label>
           <label>Submission Type<select id="lessonPlanSubmissionType" required>${optionList(submissionTypes, record?.submissionType || "", "Select type")}</select></label>
           <label id="lessonPlanFileField">DLL Link<input id="lessonPlanFileLink" type="url" placeholder="https://..." value="${escapeHtml(record?.fileLink || "")}" /></label>
         </div>
-        ${hasWorkloads ? "" : `<p class="empty-state">No assigned subject-section loads are available for lesson plan submission.</p>`}
+        ${hasWorkloads ? "" : `<p class="empty-state">No assigned classes are available for lesson plan submission.</p>`}
         <label class="modal-field">Teacher Remarks<textarea id="lessonPlanTeacherRemarks" rows="4">${escapeHtml(record?.teacherRemarks || "")}</textarea></label>
         <div id="academicFormMessage" class="message hidden" role="status"></div>
         <div class="modal-actions">
@@ -7463,7 +7930,7 @@ async function handleLessonPlanFormSubmit(event) {
   const submissionType = document.querySelector("#lessonPlanSubmissionType").value;
   const fileLink = document.querySelector("#lessonPlanFileLink").value.trim();
   if (!workload || !canSubmitLessonPlanForWorkload(workload)) {
-    message.textContent = "Select one of your assigned subject-section loads.";
+    message.textContent = "Select one of your assigned classes.";
     message.classList.add("error");
     message.classList.remove("hidden");
     return;
@@ -7522,7 +7989,7 @@ async function handleLessonPlanFormSubmit(event) {
     await createRoleNotifications(["Principal", "Master Teacher", "Head Teacher"].filter((role) => role !== currentUserProfile.role), {
       notificationType: "lesson_plan_submitted",
       title: "Lesson plan submitted",
-      message: `${data.teacherName} submitted ${data.subjectName} for ${data.sectionName}.`,
+      message: `${data.teacherName} submitted ${subjectGradeSectionClassLabel(data)}.`,
       relatedModule: "Lesson Plans",
       relatedRecordId: lessonPlanId,
       actionUrl: "#Lesson Plans",
@@ -7546,7 +8013,7 @@ function openLessonPlanReviewForm(record) {
           <button class="icon-button close-academic-modal" type="button" aria-label="Close">x</button>
         </div>
         <p class="review-summary">
-          ${escapeHtml(record.subjectName || "Subject")} - ${escapeHtml(record.sectionName || "Section")}<br />
+          ${escapeHtml(subjectGradeSectionClassLabel(record))}<br />
           <span>${escapeHtml(record.submissionType || "Submission")} ${record.fileLink ? "- link provided" : "- hard copy / no link"}</span>
         </p>
         <label>Status<select id="lessonPlanReviewStatus" required>${optionList(["Noted", "Confirmed", "Returned for Revision"], record.status || "", "Select status")}</select></label>
@@ -7585,7 +8052,7 @@ async function handleLessonPlanReviewSubmit(event) {
       recipientRole: record.teacherRole || "Teacher",
       notificationType: "lesson_plan_reviewed",
       title: "Lesson plan reviewed",
-      message: `${record.subjectName} for ${record.sectionName} was ${document.querySelector("#lessonPlanReviewStatus").value}.`,
+      message: `${subjectGradeSectionClassLabel(record)} was ${document.querySelector("#lessonPlanReviewStatus").value}.`,
       relatedModule: "Lesson Plans",
       relatedRecordId: record.id,
       actionUrl: "#Lesson Plans",
@@ -7605,7 +8072,7 @@ async function renderAssessmentModule() {
   els.dashboardContent.innerHTML = `
     <section class="module-panel compliance-toolbar">
       <div><p class="eyebrow">Assessment monitoring</p><h2>Diagnostic Test and Exam</h2></div>
-      <div class="toolbar-actions"><button id="newAssessmentButton" class="primary-button" type="button">Encode Scores</button></div>
+      <div id="assessmentToolbarActions" class="toolbar-actions"></div>
     </section>
     <section class="attendance-analytics" id="assessmentComparisonCards">
       <p class="empty-state">Loading assessment comparison...</p>
@@ -7636,6 +8103,13 @@ async function renderAssessmentModule() {
     classRecordsCache = await getAssessmentVisibleClasses();
     studentRecordsCache = await getAssessmentVisibleStudents(classRecordsCache);
     assessmentRecordsCache = await getVisibleAssessments();
+    const assessmentActions = document.querySelector("#assessmentToolbarActions");
+    if (assessmentActions) {
+      const hasOwnClasses = getAssessmentEditableWorkloads().length > 0;
+      assessmentActions.innerHTML = canEncodeAssessmentScores() && hasOwnClasses
+        ? `<button id="newAssessmentButton" class="primary-button" type="button">Encode Scores</button>`
+        : "";
+    }
     document.querySelector("#assessmentSchoolYearFilter").innerHTML = optionList(uniqueOptions(assessmentRecordsCache, "schoolYear"), "", "All years");
     document.querySelector("#assessmentTermFilter").innerHTML = optionList([...new Set(assessmentScopeOptions.filter((item) => activeAssessmentScopes().includes(item.key)).map((item) => item.term))], "", "All visible terms");
     document.querySelector("#assessmentGradeFilter").innerHTML = optionList(uniqueOptions([...assessmentRecordsCache, ...classRecordsCache], "gradeLevel"), "", "All grade levels");
@@ -7674,6 +8148,7 @@ function applyAssessmentFilters() {
       record.sectionName,
       record.gradeLevel,
       assessmentSubjectName(record),
+      subjectGradeSectionClassLabel(record, "No section"),
       assessmentTeacherName(record),
       assessmentDisplayType(record),
       record.assessmentTitle,
@@ -7702,7 +8177,7 @@ function applyAssessmentFilters() {
   `).join("");
   host.innerHTML = `
     <table class="academic-table assessment-record-table">
-      <thead><tr><th>Subject-Grade-Class</th><th>Subject Teacher</th>${termHeaders}<th>Learners</th></tr></thead>
+      <thead><tr><th>Class</th><th>Subject Teacher</th>${termHeaders}<th>Learners</th></tr></thead>
       <tbody>${comparisonRows.map((row, index) => `
         <tr class="assessment-group-row" data-target="assessmentGroupDetails${index}" tabindex="0">
           <td><strong>${escapeHtml(assessmentGroupClassLabel(row))}</strong><small class="row-note">${escapeHtml(row.schoolYear || "No school year")}</small></td>
@@ -7921,7 +8396,7 @@ function renderAssessmentComparisonDetails(row, terms = []) {
 }
 
 function assessmentGroupClassLabel(group = {}) {
-  return `${group.subjectName || "Subject"} - ${group.gradeLevel || "Grade"} - ${assessmentSectionOnlyLabel(group.sectionName)}`;
+  return subjectGradeSectionClassLabel(group);
 }
 
 function assessmentPerformanceRows(groups = [], getter) {
@@ -7979,7 +8454,7 @@ function renderAssessmentComparisonCards(records = [], groups = buildAssessmentG
         termRows.length >= 2 && termRows.at(-1)[1] < termRows.at(-2)[1] ? `MPS decreased by ${(termRows.at(-2)[1] - termRows.at(-1)[1]).toFixed(1)}% from the previous term.` : "",
         bestGrade[0] !== "None" ? `${bestGrade[0]} has the highest average MPS by grade.` : "",
         lowest[0] !== "None" ? `${lowest[0]} needs instructional follow-up.` : "",
-        comparedCount ? `${comparedCount} subject-section term pairs have both diagnostic and term exam MPS.` : "",
+        comparedCount ? `${comparedCount} class-term pairs have both diagnostic and term exam MPS.` : "",
       ])}
     </div>
   `;
@@ -7988,7 +8463,7 @@ function renderAssessmentComparisonCards(records = [], groups = buildAssessmentG
 function openAssessmentForm(record = null) {
   editingAssessmentId = record?.id || null;
   const editableWorkloads = getAssessmentEditableWorkloads();
-  const selectedWorkload = record ? findAssessmentEditableWorkload(record, editableWorkloads) : null;
+  const selectedWorkload = record && canEditAssessmentRecord(record) ? findAssessmentEditableWorkload(record, editableWorkloads) : null;
   const selectedScoreType = record ? assessmentScoreTypeFromType(assessmentDisplayType(record)) : "";
   const scoreTypeOptions = assessmentScoreTypes
     .map((type) => `<option value="${escapeHtml(type.value)}" ${type.value === selectedScoreType ? "selected" : ""}>${escapeHtml(type.label)}</option>`)
@@ -8005,7 +8480,7 @@ function openAssessmentForm(record = null) {
         <div class="form-grid learner-form-grid">
           <label>Term<select id="assessmentTerm" required>${optionList([...new Set(assessmentScopeOptions.filter((item) => activeAssessmentScopes().includes(item.key)).map((item) => item.term))], record?.term || "", "Select term")}</select></label>
           <label>Type<select id="assessmentScoreType" required><option value="">Select type</option>${scoreTypeOptions}</select></label>
-          <label>Total Items<input id="assessmentDefaultHighest" type="number" min="1" step="0.01" value="${escapeHtml(record ? getAssessmentHighScore(record, record.postTestScore ? "post" : "pre") : "")}" placeholder="Apply to all" /></label>
+          <label>Total Items<input id="assessmentDefaultHighest" type="text" inputmode="decimal" autocomplete="off" value="${escapeHtml(record ? getAssessmentHighScore(record, record.postTestScore ? "post" : "pre") : "")}" placeholder="Apply to all" /></label>
           <div class="batch-actions">
             <button id="applyHighestToAll" class="secondary-button" type="button">Apply Highest to All</button>
           </div>
@@ -8014,7 +8489,7 @@ function openAssessmentForm(record = null) {
         <div class="assessment-workload-picker" id="assessmentWorkloadPicker">
           ${hasWorkloads ? renderAssessmentWorkloadCards(editableWorkloads, selectedWorkload?.id || "") : `<p class="empty-state">${escapeHtml(noWorkloadMessage)}</p>`}
         </div>
-        <div id="assessmentBatchHost" class="batch-table-host"><p class="empty-state">${hasWorkloads ? "Select a subject-grade-class card to show students." : escapeHtml(noWorkloadMessage)}</p></div>
+        <div id="assessmentBatchHost" class="batch-table-host"><p class="empty-state">${hasWorkloads ? "Select a class card to show students." : escapeHtml(noWorkloadMessage)}</p></div>
         <div id="academicFormMessage" class="message hidden" role="status"></div>
         <div class="modal-actions">
           <button class="secondary-button close-academic-modal" type="button">Cancel</button>
@@ -8023,45 +8498,24 @@ function openAssessmentForm(record = null) {
       </form>
     </div>
   `);
-  renderAssessmentBatchRows();
 }
 
 function assessmentWorkloadEmptyMessage() {
-  if (currentUserProfile?.role === "Teacher") {
-    const advisoryClasses = classRecordsCache.filter((section) =>
-      section.adviserId === auth.currentUser.uid
-      && (section.status || "active") !== "archived"
-    );
-    if (!advisoryClasses.length) {
-      return "No advisory class or assigned teaching load is available for score encoding.";
-    }
-    const hasMappedSubject = advisoryClasses.some((section) =>
-      schoolSubjectRecordsCache.some((subject) =>
-        (subject.status || "active") !== "archived"
-        && (!subject.gradeLevel || subject.gradeLevel === section.gradeLevel)
-        && (!subject.sectionId || subject.sectionId === section.id)
-      )
-    );
-    if (!hasMappedSubject) {
-      return "No subjects are mapped to your advisory grade or section yet. Ask the Principal to add subjects in School Setup.";
-    }
+  if (canEncodeAssessmentScores()) {
+    return "No subject-grade-section teaching load is assigned to your account for score encoding.";
   }
-  return "No subject-grade-section classes are available for score encoding.";
+  return "No classes assigned to your account are available for score encoding.";
 }
 
 function renderAssessmentWorkloadCards(workloads = [], selectedId = "") {
   return `
     <div class="assessment-workload-card-grid">
       ${workloads.map((workload) => {
-        const section = getSelectedClass(workload.sectionId);
-        const grade = workload.gradeLevel || section?.gradeLevel || "Grade";
-        const sectionName = assessmentSectionOnlyLabel(workload.sectionName || section?.sectionName || "Class");
         const activeStudents = sectionActiveStudents(workload.sectionId).length;
         const selected = workload.id === selectedId;
         return `
           <button class="assessment-workload-card ${selected ? "is-selected" : ""}" type="button" data-workload-id="${escapeAttribute(workload.id)}" aria-pressed="${selected ? "true" : "false"}">
-            <strong>${escapeHtml(workload.subjectName || "Subject")}</strong>
-            <span>${escapeHtml(`${grade} - ${sectionName}`)}</span>
+            <strong>${escapeHtml(subjectGradeSectionClassLabel(workload))}</strong>
             <small>${escapeHtml(workload.teacherName || currentUserProfile?.fullName || "Subject Teacher")}</small>
             <em>${activeStudents} learner${activeStudents === 1 ? "" : "s"}</em>
           </button>
@@ -8102,14 +8556,14 @@ function findAssessmentEditableWorkload(record = {}, workloads = getAssessmentEd
 }
 
 function getAssessmentEditableWorkloads() {
+  if (!canEncodeAssessmentScores()) return [];
   const assignedWorkloads = teacherWorkloadRecordsCache
     .filter((workload) =>
       workload.sectionId
-      && (canViewAllAcademic() || workload.teacherId === auth.currentUser.uid)
+      && workload.teacherId === auth.currentUser.uid
       && getSelectedClass(workload.sectionId)?.status !== "archived"
     );
-  const workloads = [...assignedWorkloads, ...buildAssessmentFallbackWorkloads(assignedWorkloads)];
-  return workloads
+  return assignedWorkloads
     .sort((a, b) => assessmentWorkloadLabel(a).localeCompare(assessmentWorkloadLabel(b)));
 }
 
@@ -8147,10 +8601,7 @@ function buildAssessmentFallbackWorkloads(existingWorkloads = []) {
 }
 
 function assessmentWorkloadLabel(workload = {}) {
-  const section = getSelectedClass(workload.sectionId);
-  const grade = workload.gradeLevel || section?.gradeLevel || "Grade";
-  const sectionName = assessmentSectionOnlyLabel(workload.sectionName || section?.sectionName || "Class");
-  return `${workload.subjectName || "Subject"} - ${grade} - ${sectionName}`;
+  return subjectGradeSectionClassLabel(workload);
 }
 
 function assessmentSectionOnlyLabel(sectionName = "") {
@@ -8160,7 +8611,7 @@ function assessmentSectionOnlyLabel(sectionName = "") {
 function assessmentSubjectOptions(sectionId = "", selected = "") {
   const workloads = teacherWorkloadRecordsCache.filter((record) =>
     record.sectionId === sectionId
-    && (currentUserProfile?.role !== "Teacher" || canViewAllAcademic() || record.teacherId === auth.currentUser.uid)
+    && record.teacherId === auth.currentUser.uid
   );
   const options = workloads.length
     ? workloads.map((workload) => ({
@@ -8190,12 +8641,11 @@ function selectedAssessmentWorkload() {
 }
 
 function canEditAssessmentSelection(sectionId, teacherUid) {
-  if (canViewAllAcademic()) return true;
   if (teacherUid === auth.currentUser.uid) {
     return teacherWorkloadRecordsCache.some((record) => record.teacherId === auth.currentUser.uid && record.sectionId === sectionId)
       || canEditSectionRecords(sectionId);
   }
-  return canEditSectionRecords(sectionId);
+  return false;
 }
 
 function findAssessmentRecord(sectionId, studentId, term, subjectId = "", assessmentType = "", assessmentTitle = "", dateAdministered = "", workloadId = "") {
@@ -8249,7 +8699,7 @@ function renderAssessmentBatchRows() {
   if (!host) return;
   const students = sectionActiveStudents(sectionId);
   if (!workload || !term || !scoreType) {
-    host.innerHTML = `<p class="empty-state">Select a term, type, and subject-grade-class card to show students.</p>`;
+    host.innerHTML = `<p class="empty-state">Select a term, type, and class card to show students.</p>`;
     return;
   }
   if (!students.length) {
@@ -8270,8 +8720,8 @@ function renderAssessmentBatchRows() {
             return `
               <tr>
                 <td class="assessment-sticky-name"><strong>${escapeHtml(`${student.lastName}, ${student.firstName} ${student.middleName || ""}`.trim())}</strong></td>
-                <td class="assessment-sticky-score"><input class="assessment-score-input ${scoreInputClass}" data-student-id="${escapeHtml(student.id)}" type="number" min="0" step="0.01" value="${escapeHtml(scoreValue ?? "")}" /></td>
-                <td><input class="assessment-highest-input ${highInputClass}" data-student-id="${escapeHtml(student.id)}" type="number" min="1" step="0.01" value="${escapeHtml(highValue ?? "")}" /></td>
+                <td class="assessment-sticky-score"><input class="assessment-score-input ${scoreInputClass}" data-student-id="${escapeHtml(student.id)}" type="text" inputmode="decimal" autocomplete="off" value="${escapeHtml(scoreValue ?? "")}" /></td>
+                <td><input class="assessment-highest-input ${highInputClass}" data-student-id="${escapeHtml(student.id)}" type="text" inputmode="decimal" autocomplete="off" value="${escapeHtml(highValue ?? "")}" /></td>
                 <td class="assessment-improvement-cell" data-student-id="${escapeHtml(student.id)}">${escapeHtml(formatAssessmentComparison(existing))}</td>
               </tr>
             `;
@@ -8331,7 +8781,12 @@ async function handleAssessmentFormSubmit(event) {
     const batchScores = students.map((student) => {
       const field = document.querySelector(`.${scoreType === "pre" ? "assessment-pre-input" : "assessment-post-input"}[data-student-id="${CSS.escape(student.id)}"]`);
       const highest = document.querySelector(`.assessment-highest-input[data-student-id="${CSS.escape(student.id)}"]`);
-      return { score: Number(field?.value || 0), highest: Number(highest?.value || 0), hasScore: Boolean(field?.value) };
+      const score = Number(field?.value || 0);
+      const high = Number(highest?.value || 0);
+      if ((field?.value && !Number.isFinite(score)) || (highest?.value && !Number.isFinite(high))) {
+        throw new Error("Enter numbers only for scores and total items.");
+      }
+      return { score, highest: high, hasScore: Boolean(field?.value) };
     }).filter((row) => row.hasScore || row.highest > 0);
     const enteredScores = batchScores.map((row) => row.score);
     const highestValues = batchScores.map((row) => row.highest).filter((value) => value > 0);
@@ -8366,6 +8821,9 @@ async function handleAssessmentFormSubmit(event) {
         throw new Error(`Add a highest possible score for ${student.lastName}, ${student.firstName}.`);
       }
       const currentScore = scoreType === "pre" ? preTestScore : postTestScore;
+      if (!Number.isFinite(currentScore) || !Number.isFinite(currentHighestPossibleScore)) {
+        throw new Error(`Enter valid numbers for ${student.lastName}, ${student.firstName}.`);
+      }
       if (currentScore > currentHighestPossibleScore) {
         throw new Error(`Score cannot be higher than the highest possible score for ${student.lastName}, ${student.firstName}.`);
       }
@@ -8453,7 +8911,7 @@ function handleAcademicAction(event) {
       updateDoc(doc(db, "classes", record.id), { status: "archived", updatedAt: serverTimestamp() })
         .then(() => createAuditLog("archive", "Classes / Sections", record.id, record, { status: "archived" }))
         .then(renderClassesModule)
-        .then(() => showDashboardMessage("Class archived."))
+        .then(() => showDashboardMessage("Section archived."))
         .catch((error) => showDashboardMessage(`Archive failed: ${error.message}`, true));
     }
     return;
@@ -8563,6 +9021,18 @@ function handleAcademicAction(event) {
   }
   if (event.target.closest("#encodeGradeButton")) {
     openGradeSubmissionForm();
+    return;
+  }
+  const editGradeSubmission = event.target.closest(".edit-grade-submission");
+  if (editGradeSubmission) {
+    const row = findGradeSubmissionRowByKey(editGradeSubmission.dataset.rowKey);
+    if (row) openGradeSubmissionForm(row);
+    return;
+  }
+  const gradeSubmissionGroupRow = event.target.closest(".grade-submission-group-row");
+  if (gradeSubmissionGroupRow) {
+    const target = document.querySelector(`#${CSS.escape(gradeSubmissionGroupRow.dataset.target)}`);
+    target?.classList.toggle("hidden");
     return;
   }
   const encodeWorkloadGrades = event.target.closest(".encode-workload-grades");
@@ -9754,7 +10224,7 @@ function renderLearnerTable() {
       <thead>
         <tr>
           <th>Learner</th>
-          <th>Class</th>
+          <th>Section</th>
           <th>Concern</th>
           <th>Risk</th>
           <th>Intervention</th>
@@ -9781,8 +10251,7 @@ function renderLearnerRow(record) {
         <small class="row-note">LRN: ${escapeHtml(record.lrn || "Not recorded")}</small>
       </td>
       <td>
-        ${escapeHtml(record.gradeLevel || "No grade")}
-        <small class="row-note">${escapeHtml(record.section || "No section")}</small>
+        ${escapeHtml([record.gradeLevel || "No grade", record.section || "No section"].join(" - "))}
         <small class="row-note">Adviser: ${escapeHtml(record.adviserName || "Not recorded")}</small>
       </td>
       <td>
@@ -10252,6 +10721,11 @@ function applyObservationFilters() {
       record.subject,
       record.gradeLevel,
       record.section,
+      subjectGradeSectionClassLabel({
+        subjectName: record.subject,
+        gradeLevel: record.gradeLevel,
+        sectionName: record.section,
+      }),
       record.observationType,
       record.status,
       record.preObservationNotes,
@@ -10364,8 +10838,11 @@ function renderObservationRow(record) {
         <small class="row-note">${escapeHtml(record.observerRole || "No role")}</small>
       </td>
       <td>
-        ${escapeHtml(record.gradeLevel || "No grade")}
-        <small class="row-note">${escapeHtml(record.section || "No section")}</small>
+        ${escapeHtml(subjectGradeSectionClassLabel({
+          subjectName: record.subject,
+          gradeLevel: record.gradeLevel,
+          sectionName: record.section,
+        }))}
       </td>
       <td>
         ${escapeHtml(record.observationDate || "No date")}
@@ -10496,7 +10973,7 @@ async function handleObservationFormSubmit(event) {
       }, {
         notificationType: "observation_scheduled",
         title: "Observation scheduled",
-        message: `${currentUserProfile.fullName} scheduled ${data.subject} on ${data.observationDate}.`,
+        message: `${currentUserProfile.fullName} scheduled ${subjectGradeSectionClassLabel(data)} on ${data.observationDate}.`,
         relatedModule: "Classroom Observation",
         relatedRecordId: docRef.id,
         actionUrl: "#Classroom Observation",
@@ -13712,6 +14189,18 @@ function bindEvents() {
   els.logoutButton.addEventListener("click", handleLogout);
   els.pendingLogoutButton.addEventListener("click", handleLogout);
   els.menuToggle.addEventListener("click", () => els.sidebar.classList.toggle("open"));
+  els.globalSearch?.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    const queryText = event.currentTarget.value.trim().toLowerCase();
+    if (!queryText) return;
+    const matchingButton = [...document.querySelectorAll(".nav-button")]
+      .find((button) => button.dataset.module?.toLowerCase().includes(queryText));
+    if (matchingButton) {
+      event.preventDefault();
+      matchingButton.click();
+      event.currentTarget.blur();
+    }
+  });
   els.notificationBell.addEventListener("click", () => {
     const isOpen = !els.notificationDropdown.classList.contains("hidden");
     els.notificationDropdown.classList.toggle("hidden", isOpen);
@@ -13759,7 +14248,7 @@ function bindEvents() {
       renderTeacherAttendanceModule();
     } else if (button.dataset.module === "Teacher Workload") {
       renderTeacherWorkloadModule();
-    } else if (button.dataset.module === "Grade Submission Tracker") {
+    } else if (["Grade Submission", "Grade Submission Tracker"].includes(button.dataset.module)) {
       renderGradeSubmissionModule();
     } else if (button.dataset.module === "Lesson Plans") {
       renderLessonPlanModule();
@@ -13986,6 +14475,20 @@ function bindEvents() {
     }
   });
 
+  document.addEventListener("keydown", (event) => {
+    if (!event.target.classList?.contains("grade-submission-grade-input") || event.key !== "Enter") return;
+    event.preventDefault();
+    const inputs = [...document.querySelectorAll(".grade-submission-grade-input")];
+    const currentIndex = inputs.indexOf(event.target);
+    const nextInput = inputs[currentIndex + 1];
+    if (nextInput) {
+      nextInput.focus();
+      nextInput.select();
+      return;
+    }
+    document.querySelector('button[name="gradeSubmissionAction"][value="draft"]')?.focus();
+  });
+
   document.addEventListener("input", (event) => {
     if (event.target.id === "settingsUserSearch") {
       renderSettingsUsersTable();
@@ -14024,7 +14527,7 @@ function bindEvents() {
     if (event.target.id === "workloadGradeLevel") {
       syncTeachingLoadSubjectOptions();
     }
-    if (["gradeTrackerSearch", "gradeTeacherFilter", "gradeSubjectFilter", "gradeSectionFilter", "gradeTermFilter"].includes(event.target.id)) {
+    if (["gradeTrackerSearch", "gradeSchoolYearFilter", "gradeTermFilter", "gradeLevelFilter", "gradeSectionFilter", "gradeSubjectFilter", "gradeTeacherFilter", "gradeStatusFilter"].includes(event.target.id)) {
       applyGradeTrackerFilters();
     }
     if (["lessonPlanSearch", "lessonPlanStatusFilter", "lessonPlanTypeFilter"].includes(event.target.id)) {
@@ -14040,8 +14543,14 @@ function bindEvents() {
       syncFinancialBalanceMessage();
     }
     handleDownloadableReportInput(event);
-    if (["gradeWorkloadId", "gradeSubmissionTerm"].includes(event.target.id)) {
-      renderGradeSubmissionRows();
+    if (["gradeSubmissionGradeLevel", "gradeSubmissionSectionId", "gradeSubmissionSubjectId", "gradeSubmissionTeacherUid"].includes(event.target.id)) {
+      syncGradeSubmissionFormFields();
+    }
+    if (event.target.id === "gradeSubmissionStatus") {
+      const dateField = document.querySelector("#gradeSubmissionDateSubmitted");
+      if (dateField && !dateField.value && gradeSubmissionCompliedStatuses.includes(event.target.value)) {
+        dateField.value = new Date().toISOString().slice(0, 10);
+      }
     }
     if (event.target.id === "workloadSectionId") {
       syncTeachingLoadSubjectOptions();
@@ -14122,8 +14631,8 @@ function bindEvents() {
     if (["assessmentWorkloadId", "assessmentTerm", "assessmentScoreType"].includes(event.target.id)) {
       renderAssessmentBatchRows();
     }
-    if (["gradeWorkloadId", "gradeSubmissionTerm"].includes(event.target.id)) {
-      renderGradeSubmissionRows();
+    if (["gradeSubmissionGradeLevel", "gradeSubmissionSectionId", "gradeSubmissionSubjectId", "gradeSubmissionTeacherUid"].includes(event.target.id)) {
+      syncGradeSubmissionFormFields();
     }
   });
 

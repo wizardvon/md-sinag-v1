@@ -225,7 +225,7 @@ export const academicViewerRoles = ["Principal", "Master Teacher", "Head Teacher
 export const academicMonitorRoles = ["Principal", "Master Teacher", "Head Teacher", "Registrar", "Teacher"];
 export const teacherAttendanceViewerRoles = ["Principal", "Registrar", "Administrative Officer", "Administrative Assistant"];
 export const teacherWorkloadRoles = ["Principal", "Master Teacher", "Head Teacher", "Teacher"];
-export const gradeSubmissionRoles = ["Principal", "Master Teacher", "Head Teacher", "Teacher"];
+export const gradeSubmissionRoles = ["Principal", "Admin", "SuperAdmin", "Master Teacher", "Head Teacher", "Teacher"];
 export const lessonPlanRoles = ["Principal", "Master Teacher", "Head Teacher", "Teacher"];
 export const inventoryFacilityRoles = ["Principal", "Head Teacher", "Administrative Assistant"];
 export const inventoryFacilityManagerRoles = ["Principal", "Administrative Assistant"];
@@ -347,7 +347,7 @@ export const modulesByRole = {
     "Classroom Observation",
     "Learner Monitoring",
     "Diagnostic Test & Exam",
-    "Grade Submission Tracker",
+    "Grade Submission",
     "Lesson Plans",
     "Teacher Workload",
     "Report Assignment",
@@ -366,7 +366,7 @@ export const modulesByRole = {
     "Classroom Observation",
     "Learner Monitoring",
     "Diagnostic Test & Exam",
-    "Grade Submission Tracker",
+    "Grade Submission",
     "Lesson Plans",
     "Classes / Sections",
     "Teacher Workload",
@@ -385,7 +385,7 @@ export const modulesByRole = {
     "Classroom Observation",
     "Learner Monitoring",
     "Diagnostic Test & Exam",
-    "Grade Submission Tracker",
+    "Grade Submission",
     "Lesson Plans",
     "Classes / Sections",
     "Teacher Workload",
@@ -403,7 +403,7 @@ export const modulesByRole = {
     "Student Attendance",
     "Learner Monitoring",
     "Diagnostic Test & Exam",
-    "Grade Submission Tracker",
+    "Grade Submission",
     "Lesson Plans",
     "Classes / Sections",
     "Report Assignment",

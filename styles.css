@@ -1,16 +1,22 @@
 :root {
   --navy-950: #071827;
-  --navy-900: #0f2a44;
-  --navy-800: #173b5c;
-  --blue-600: #1f6feb;
-  --gray-50: #f8fafc;
-  --gray-100: #eef2f6;
-  --gray-200: #d9e2ec;
+  --navy-900: #082b66;
+  --navy-800: #0b3f91;
+  --blue-600: #0758d8;
+  --blue-700: #0645aa;
+  --gray-50: #f8fbff;
+  --gray-100: #eef4fb;
+  --gray-200: #dbe6f2;
+  --gray-400: #94a3b8;
   --gray-500: #62748a;
+  --gray-600: #475569;
   --gray-700: #334155;
+  --gray-900: #0f172a;
   --white: #ffffff;
-  --green: #12805c;
-  --amber: #c77800;
+  --green: #138a43;
+  --green-700: #087333;
+  --amber: #f2a900;
+  --amber-700: #b77900;
   --red: #c2410c;
   --purple: #6d5bd0;
   --teal: #0f766e;
@@ -22,7 +28,9 @@
   --financial-chart-6: #c2410c;
   --financial-chart-7: #173b5c;
   --financial-chart-8: #62748a;
-  --shadow: 0 18px 50px rgba(15, 42, 68, 0.14);
+  --shadow-sm: 0 8px 22px rgba(8, 43, 102, 0.08);
+  --shadow: 0 20px 55px rgba(8, 43, 102, 0.15);
+  --shadow-lg: 0 28px 90px rgba(8, 43, 102, 0.2);
   --radius: 8px;
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
     "Segoe UI", sans-serif;
@@ -36,7 +44,9 @@ body {
   margin: 0;
   min-height: 100vh;
   color: var(--gray-700);
-  background: var(--gray-100);
+  background:
+    radial-gradient(circle at 16% -8%, rgba(7, 88, 216, 0.12), transparent 30%),
+    linear-gradient(180deg, #f7fbff 0%, #eef4fb 48%, #f8fbff 100%);
 }
 
 button,
@@ -2071,6 +2081,87 @@ th {
   width: 100%;
 }
 
+.grade-submission-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 14px;
+}
+
+.grade-submission-card {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+  background: var(--white);
+  border: 1px solid var(--gray-200);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
+}
+
+.grade-submission-card h3 {
+  margin: 10px 0 4px;
+  color: var(--gray-900);
+  font-size: 1.05rem;
+}
+
+.grade-submission-card p {
+  margin: 0;
+  color: var(--gray-600);
+  font-weight: 800;
+}
+
+.grade-submission-card dl,
+.grade-encoding-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px;
+  margin: 0;
+}
+
+.grade-submission-card dt,
+.grade-encoding-summary span {
+  display: block;
+  color: var(--gray-500);
+  font-size: 0.72rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.grade-submission-card dd,
+.grade-encoding-summary strong {
+  display: block;
+  margin: 2px 0 0;
+  color: var(--gray-900);
+}
+
+.grade-encoding-summary {
+  padding: 14px;
+  background: var(--gray-50);
+  border: 1px solid var(--gray-200);
+  border-radius: var(--radius);
+}
+
+.grade-encoding-table {
+  min-width: 560px;
+}
+
+.grade-encoding-table th:first-child,
+.grade-encoding-table td:first-child {
+  width: 64px;
+  text-align: center;
+}
+
+.grade-encoding-table th:last-child,
+.grade-encoding-table td:last-child {
+  width: 150px;
+}
+
+.grade-encoding-table .grade-submission-grade-input {
+  min-height: 44px;
+  font-size: 1rem;
+  font-weight: 800;
+  text-align: center;
+}
+
 .adviser-grade-matrix {
   min-width: 1120px;
 }
@@ -2923,6 +3014,414 @@ th {
   margin-top: 8px;
 }
 
+.auth-layout {
+  position: relative;
+  isolation: isolate;
+  padding: 24px;
+  background:
+    linear-gradient(135deg, rgba(8, 43, 102, 0.08), rgba(19, 138, 67, 0.08)),
+    var(--gray-50);
+}
+
+.auth-layout::before {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  content: "";
+  background:
+    linear-gradient(134deg, transparent 0 70%, rgba(19, 138, 67, 0.9) 70% 82%, rgba(7, 88, 216, 0.95) 82%),
+    linear-gradient(42deg, rgba(8, 43, 102, 0.98), rgba(8, 43, 102, 0.88));
+  clip-path: polygon(0 0, 54% 0, 43% 100%, 0 100%);
+}
+
+.auth-brand,
+.auth-panel {
+  min-height: calc(100vh - 48px);
+  box-shadow: var(--shadow-lg);
+}
+
+.auth-brand {
+  position: relative;
+  overflow: hidden;
+  border-radius: 8px 0 0 8px;
+  background:
+    linear-gradient(145deg, rgba(8, 43, 102, 0.95), rgba(8, 43, 102, 0.78) 48%, rgba(19, 138, 67, 0.88)),
+    url("assets/sinag_logo.png") 84% 14% / min(40vw, 430px) no-repeat;
+}
+
+.auth-brand::after {
+  position: absolute;
+  right: 4%;
+  bottom: 0;
+  width: min(46vw, 520px);
+  height: 150px;
+  content: "";
+  background:
+    linear-gradient(155deg, transparent 0 45%, #f2a900 45% 49%, transparent 49%),
+    linear-gradient(160deg, transparent 0 34%, rgba(19, 138, 67, 0.9) 34% 55%, rgba(7, 88, 216, 0.95) 55% 78%, transparent 78%);
+  opacity: 0.95;
+}
+
+.auth-logo {
+  width: 110px;
+  height: 110px;
+  margin-bottom: 26px;
+  object-fit: contain;
+  padding: 8px;
+  background: rgba(255, 255, 255, 0.94);
+  border-radius: 999px;
+  box-shadow: 0 18px 45px rgba(0, 0, 0, 0.22);
+}
+
+.auth-panel {
+  width: min(100%, 500px);
+  justify-self: end;
+  border: 1px solid rgba(219, 230, 242, 0.9);
+  border-radius: 0 8px 8px 0;
+}
+
+.primary-button:hover {
+  background: var(--blue-700);
+  border-color: var(--blue-700);
+  box-shadow: 0 12px 24px rgba(7, 88, 216, 0.18);
+}
+
+.secondary-button:hover,
+.icon-button:hover {
+  color: var(--blue-600);
+  border-color: #b8cdf5;
+  box-shadow: 0 8px 18px rgba(8, 43, 102, 0.08);
+}
+
+.dashboard-layout {
+  grid-template-columns: 300px minmax(0, 1fr);
+  background:
+    linear-gradient(180deg, rgba(248, 251, 255, 0.96), rgba(238, 244, 251, 0.96)),
+    var(--gray-100);
+}
+
+.sidebar {
+  padding: 24px 16px;
+  background:
+    linear-gradient(172deg, rgba(7, 24, 39, 0.96), rgba(8, 43, 102, 0.98) 55%, rgba(19, 138, 67, 0.94)),
+    var(--navy-950);
+  box-shadow: inset -1px 0 rgba(255, 255, 255, 0.1), 12px 0 40px rgba(8, 43, 102, 0.14);
+}
+
+.sidebar::after {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 140px;
+  pointer-events: none;
+  content: "";
+  background:
+    linear-gradient(150deg, transparent 0 58%, #f2a900 58% 61%, transparent 61%),
+    linear-gradient(155deg, transparent 0 44%, rgba(19, 138, 67, 0.85) 44% 68%, rgba(7, 88, 216, 0.8) 68%);
+  opacity: 0.9;
+}
+
+.brand-lockup {
+  position: relative;
+  z-index: 1;
+  padding: 10px 10px 22px;
+}
+
+.brand-logo {
+  width: 62px;
+  height: 62px;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.22);
+}
+
+.sidebar-nav,
+.sidebar-footer {
+  position: relative;
+  z-index: 1;
+}
+
+.nav-button {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  min-height: 46px;
+  padding: 10px 12px;
+  font-weight: 800;
+}
+
+.nav-icon {
+  display: grid;
+  flex: 0 0 28px;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  color: #eaf3ff;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  font-size: 0.88rem;
+}
+
+.nav-button.active {
+  color: var(--white);
+  background: linear-gradient(90deg, rgba(7, 88, 216, 0.96), rgba(7, 88, 216, 0.7));
+  border-color: rgba(255, 255, 255, 0.24);
+  box-shadow: 0 12px 26px rgba(0, 0, 0, 0.18);
+}
+
+.nav-button.active .nav-icon {
+  color: var(--navy-900);
+  background: var(--white);
+}
+
+.main-panel {
+  padding: 24px 28px 32px;
+}
+
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 9;
+  margin: -24px -28px 24px;
+  padding: 22px 28px;
+  background: rgba(248, 251, 255, 0.88);
+  border-bottom: 1px solid rgba(219, 230, 242, 0.86);
+  backdrop-filter: blur(18px);
+}
+
+.topbar > div:first-of-type {
+  min-width: 0;
+}
+
+.topbar-actions {
+  flex: 1;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+.topbar-search {
+  position: relative;
+  display: flex;
+  align-items: center;
+  width: min(420px, 38vw);
+  min-width: 230px;
+}
+
+.topbar-search span {
+  position: absolute;
+  left: 14px;
+  color: var(--blue-600);
+  font-size: 1.1rem;
+  font-weight: 900;
+}
+
+.topbar-search input {
+  min-height: 44px;
+  padding-left: 42px;
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 10px 25px rgba(8, 43, 102, 0.06);
+}
+
+.user-chip {
+  display: grid;
+  grid-template-columns: 42px minmax(0, auto);
+  align-items: center;
+  gap: 10px;
+  min-width: 190px;
+  padding: 6px 10px 6px 6px;
+  background: var(--white);
+  border: 1px solid var(--gray-200);
+  border-radius: 999px;
+  box-shadow: 0 10px 24px rgba(8, 43, 102, 0.08);
+}
+
+.user-avatar {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  place-items: center;
+  color: var(--white);
+  background: linear-gradient(135deg, var(--green), var(--blue-600));
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 900;
+}
+
+.user-chip strong,
+.user-chip small {
+  display: block;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.user-chip strong {
+  color: var(--navy-950);
+  font-size: 0.84rem;
+}
+
+.user-chip small {
+  color: var(--gray-500);
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+#menuToggle {
+  position: relative;
+  color: transparent;
+}
+
+#menuToggle::before {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--navy-900);
+  content: "\2630";
+}
+
+.card-grid {
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+}
+
+.stat-card,
+.table-card,
+.module-panel,
+.chart-card,
+.attendance-kpi-card,
+.grade-subject-panel,
+.assessment-workload-card {
+  border-color: rgba(219, 230, 242, 0.95);
+  box-shadow: var(--shadow-sm);
+}
+
+.stat-card {
+  position: relative;
+  min-height: 144px;
+  overflow: hidden;
+}
+
+.stat-card::before {
+  position: absolute;
+  inset: 0 0 auto;
+  height: 4px;
+  content: "";
+  background: var(--blue-600);
+}
+
+.stat-card-green::before {
+  background: var(--green);
+}
+
+.stat-card-amber::before {
+  background: var(--amber);
+}
+
+.stat-card-navy::before {
+  background: var(--navy-900);
+}
+
+.stat-card-label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.stat-card-label > span:last-child {
+  min-width: 0;
+  color: var(--navy-900);
+  font-size: 0.84rem;
+}
+
+.stat-icon {
+  display: grid !important;
+  flex: 0 0 44px;
+  width: 44px;
+  height: 44px;
+  place-items: center;
+  margin: 0 !important;
+  color: var(--white) !important;
+  background: linear-gradient(135deg, var(--blue-600), var(--navy-900));
+  border-radius: 999px;
+  box-shadow: 0 10px 22px rgba(7, 88, 216, 0.22);
+}
+
+.stat-card-green .stat-icon {
+  background: linear-gradient(135deg, var(--green), #0b6b36);
+}
+
+.stat-card-amber .stat-icon {
+  background: linear-gradient(135deg, var(--amber), #e88b00);
+}
+
+.stat-card strong {
+  font-size: clamp(1.75rem, 4vw, 2.35rem);
+}
+
+.stat-card-top b,
+.badge,
+.calendar-chip,
+.calendar-attendance-badge {
+  border: 1px solid currentColor;
+}
+
+.dashboard-section-title h2 {
+  color: var(--navy-950);
+  font-size: 1.26rem;
+}
+
+.section-header {
+  background: linear-gradient(180deg, #ffffff, #f8fbff);
+}
+
+th {
+  color: var(--navy-900);
+  background: #f3f7fc;
+  letter-spacing: 0;
+}
+
+tbody tr:hover td {
+  background: #f8fbff;
+}
+
+.chart-track,
+.compliance-progress {
+  background: #e8eef6;
+}
+
+.chart-track i {
+  background: linear-gradient(90deg, var(--blue-600), var(--green));
+}
+
+.empty-state {
+  border-radius: var(--radius);
+  background: linear-gradient(180deg, #ffffff, #f8fbff);
+}
+
+.urgent-task-card {
+  border-color: #b8cdf5;
+  background:
+    linear-gradient(135deg, rgba(7, 88, 216, 0.1), rgba(19, 138, 67, 0.08)),
+    var(--white);
+}
+
+.urgent-task-card::before {
+  background: linear-gradient(90deg, var(--amber), var(--blue-600));
+}
+
+.module-panel.compliance-toolbar {
+  background:
+    linear-gradient(100deg, rgba(7, 88, 216, 0.08), rgba(19, 138, 67, 0.08)),
+    var(--white);
+}
+
+.modal {
+  border: 1px solid rgba(219, 230, 242, 0.98);
+  box-shadow: var(--shadow-lg);
+}
+
 @media (max-width: 1100px) {
   .card-grid {
     grid-template-columns: repeat(3, minmax(160px, 1fr));
@@ -3025,6 +3524,49 @@ th {
 
   .financial-pie-layout {
     grid-template-columns: minmax(140px, 170px) minmax(0, 1fr);
+  }
+
+  .auth-layout {
+    padding: 0;
+  }
+
+  .auth-layout::before {
+    clip-path: none;
+  }
+
+  .auth-brand,
+  .auth-panel {
+    min-height: auto;
+    border-radius: 0;
+    box-shadow: none;
+  }
+
+  .auth-brand {
+    min-height: 34vh;
+  }
+
+  .topbar {
+    position: static;
+    flex-wrap: wrap;
+    margin: -18px -18px 18px;
+    padding: 18px;
+  }
+
+  .topbar-actions {
+    width: 100%;
+    flex: 1 1 100%;
+    justify-content: stretch;
+  }
+
+  .topbar-search {
+    flex: 1 1 100%;
+    width: 100%;
+    min-width: 0;
+    order: 3;
+  }
+
+  .user-chip {
+    min-width: 0;
   }
 }
 
@@ -3215,6 +3757,37 @@ th {
   .financial-bar-track {
     min-height: 128px;
     padding: 0 6px;
+  }
+
+  .auth-logo {
+    width: 82px;
+    height: 82px;
+    margin-bottom: 18px;
+  }
+
+  .auth-brand h1 {
+    font-size: clamp(1.9rem, 12vw, 3.1rem);
+    line-height: 1;
+  }
+
+  .topbar h1 {
+    font-size: 1.45rem;
+  }
+
+  .user-chip {
+    grid-template-columns: 38px;
+    width: 50px;
+    min-width: 50px;
+    padding: 5px;
+  }
+
+  .user-chip > div {
+    display: none;
+  }
+
+  .user-avatar {
+    width: 38px;
+    height: 38px;
   }
 }
 
