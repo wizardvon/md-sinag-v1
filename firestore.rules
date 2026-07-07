@@ -13,42 +13,61 @@ service cloud.firestore {
     function isApprovedPrincipal() {
       return signedIn()
         && userDoc(request.auth.uid).data.status == "approved"
-        && userDoc(request.auth.uid).data.role == "Principal";
+        && hasCurrentRole("Principal");
     }
 
     function currentRole() {
       return userDoc(request.auth.uid).data.role;
     }
 
+    function currentRoles() {
+      return rolesForUser(request.auth.uid);
+    }
+
+    function rolesForUser(uid) {
+      let user = userDoc(uid).data;
+      return user.keys().hasAny(["roles"]) && user.roles is list
+        ? user.roles
+        : [user.role];
+    }
+
+    function hasCurrentRole(role) {
+      return role in currentRoles();
+    }
+
+    function hasAnyCurrentRole(roleList) {
+      return currentRoles().hasAny(roleList);
+    }
+
     function isApprovedRole(role) {
       return signedIn()
         && userDoc(request.auth.uid).data.status == "approved"
-        && currentRole() == role;
+        && hasCurrentRole(role);
     }
 
     function isAssignmentCreator() {
       return signedIn()
         && userDoc(request.auth.uid).data.status == "approved"
-        && currentRole() in ["Principal", "Master Teacher", "Head Teacher"];
+        && hasAnyCurrentRole(["Principal", "Master Teacher", "Head Teacher"]);
     }
 
     function isComplianceRole() {
       return signedIn()
         && userDoc(request.auth.uid).data.status == "approved"
-        && currentRole() in [
+        && hasAnyCurrentRole([
           "Teacher",
           "Master Teacher",
           "Head Teacher",
           "Registrar",
           "Administrative Officer",
           "Administrative Assistant"
-        ];
+        ]);
     }
 
     function isLearnerMonitorRole() {
       return signedIn()
         && userDoc(request.auth.uid).data.status == "approved"
-        && currentRole() in [
+        && hasAnyCurrentRole([
           "Principal",
           "Master Teacher",
           "Head Teacher",
@@ -56,7 +75,7 @@ service cloud.firestore {
           "Registrar",
           "Administrative Officer",
           "Administrative Assistant"
-        ];
+        ]);
     }
 
     function validRole(role) {
@@ -69,6 +88,21 @@ service cloud.firestore {
         "Administrative Officer",
         "Administrative Assistant"
       ];
+    }
+
+    function validRoleList(roleList) {
+      return roleList is list
+        && roleList.size() > 0
+        && roleList.size() <= 7
+        && roleList.hasOnly([
+          "Principal",
+          "Master Teacher",
+          "Head Teacher",
+          "Teacher",
+          "Registrar",
+          "Administrative Officer",
+          "Administrative Assistant"
+        ]);
     }
 
     function validNewUserProfile(userId) {
@@ -96,9 +130,12 @@ service cloud.firestore {
         && resource.data.status == "pending"
         && request.resource.data.status == "approved"
         && validRole(request.resource.data.role)
+        && validRoleList(request.resource.data.roles)
+        && request.resource.data.role in request.resource.data.roles
         && request.resource.data.approvedBy == request.auth.uid
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
           "role",
+          "roles",
           "status",
           "approvedAt",
           "approvedBy"
@@ -111,8 +148,11 @@ service cloud.firestore {
         && resource.data.status == "approved"
         && request.resource.data.status == "approved"
         && validRole(request.resource.data.role)
+        && validRoleList(request.resource.data.roles)
+        && request.resource.data.role in request.resource.data.roles
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-          "role"
+          "role",
+          "roles"
         ]);
     }
 
@@ -124,7 +164,7 @@ service cloud.firestore {
           || (isAssignmentCreator() && resource.data.status == "approved")
           || (
             userDoc(request.auth.uid).data.status == "approved"
-            && currentRole() in ["Registrar", "Administrative Officer", "Administrative Assistant"]
+            && hasAnyCurrentRole(["Registrar", "Administrative Officer", "Administrative Assistant"])
             && resource.data.status == "approved"
           )
         );
@@ -220,13 +260,13 @@ service cloud.firestore {
     function isEnrollmentMonitorRole() {
       return signedIn()
         && userDoc(request.auth.uid).data.status == "approved"
-        && currentRole() in [
+        && hasAnyCurrentRole([
           "Principal",
           "Master Teacher",
           "Head Teacher",
           "Teacher",
           "Registrar"
-        ];
+        ]);
     }
 
     function validEnrollmentStatus(status) {
@@ -271,7 +311,7 @@ service cloud.firestore {
     function isDocumentRole() {
       return signedIn()
         && userDoc(request.auth.uid).data.status == "approved"
-        && currentRole() in [
+        && hasAnyCurrentRole([
           "Principal",
           "Master Teacher",
           "Head Teacher",
@@ -279,19 +319,19 @@ service cloud.firestore {
           "Registrar",
           "Administrative Officer",
           "Administrative Assistant"
-        ];
+        ]);
     }
 
     function isInventoryFacilityViewer() {
       return signedIn()
         && userDoc(request.auth.uid).data.status == "approved"
-        && currentRole() in ["Principal", "Head Teacher", "Administrative Assistant"];
+        && hasAnyCurrentRole(["Principal", "Head Teacher", "Administrative Assistant"]);
     }
 
     function isInventoryFacilityManager() {
       return signedIn()
         && userDoc(request.auth.uid).data.status == "approved"
-        && currentRole() in ["Principal", "Administrative Assistant"];
+        && hasAnyCurrentRole(["Principal", "Administrative Assistant"]);
     }
 
     function validInventoryCategory(category) {
@@ -320,7 +360,7 @@ service cloud.firestore {
     function isFinancialReportViewer() {
       return signedIn()
         && userDoc(request.auth.uid).data.status == "approved"
-        && currentRole() in [
+        && hasAnyCurrentRole([
           "Principal",
           "Master Teacher",
           "Head Teacher",
@@ -328,19 +368,19 @@ service cloud.firestore {
           "Registrar",
           "Administrative Officer",
           "Administrative Assistant"
-        ];
+        ]);
     }
 
     function isFinancialReportManager() {
       return signedIn()
         && userDoc(request.auth.uid).data.status == "approved"
-        && currentRole() in ["Principal", "Administrative Officer", "Administrative Assistant"];
+        && hasAnyCurrentRole(["Principal", "Administrative Officer", "Administrative Assistant"]);
     }
 
     function isFinancialReportReviewer() {
       return signedIn()
         && userDoc(request.auth.uid).data.status == "approved"
-        && currentRole() in ["Principal", "Master Teacher", "Head Teacher"];
+        && hasAnyCurrentRole(["Principal", "Master Teacher", "Head Teacher"]);
     }
 
     function validFinancialReportType(reportType) {
@@ -454,7 +494,7 @@ service cloud.firestore {
     function isPpaRole() {
       return signedIn()
         && userDoc(request.auth.uid).data.status == "approved"
-        && currentRole() in [
+        && hasAnyCurrentRole([
           "Principal",
           "Master Teacher",
           "Head Teacher",
@@ -462,7 +502,7 @@ service cloud.firestore {
           "Registrar",
           "Administrative Officer",
           "Administrative Assistant"
-        ];
+        ]);
     }
 
     function validPpaCategory(category) {
@@ -508,8 +548,8 @@ service cloud.firestore {
     }
 
     function validAssignableRole(role) {
-      return (currentRole() == "Principal" && validRole(role))
-        || (currentRole() in ["Master Teacher", "Head Teacher"] && role in [
+      return (hasCurrentRole("Principal") && validRole(role))
+        || (hasAnyCurrentRole(["Master Teacher", "Head Teacher"]) && role in [
           "Teacher",
           "Registrar",
           "Administrative Officer",
@@ -553,7 +593,7 @@ service cloud.firestore {
       return isAssignmentCreator()
         && validReportAssignmentFields()
         && request.resource.data.assignedByUid == request.auth.uid
-        && request.resource.data.assignedByRole == currentRole()
+        && request.resource.data.assignedByRole in currentRoles()
         && request.resource.data.assignedByName is string
         && request.resource.data.assignedByName.size() > 0
         && request.resource.data.assignedToUid is string
@@ -648,10 +688,10 @@ service cloud.firestore {
     function canReadLearnerRecord() {
       return isLearnerMonitorRole()
         && (
-          currentRole() in ["Principal", "Master Teacher", "Head Teacher", "Administrative Assistant"]
+          hasAnyCurrentRole(["Principal", "Master Teacher", "Head Teacher", "Administrative Assistant"])
           || resource.data.createdByUid == request.auth.uid
-          || (currentRole() == "Registrar" && registrarLearnerConcern(resource.data.concernType))
-          || (currentRole() == "Administrative Officer" && administrativeOfficerLearnerConcern(resource.data.concernType))
+          || (hasCurrentRole("Registrar") && registrarLearnerConcern(resource.data.concernType))
+          || (hasCurrentRole("Administrative Officer") && administrativeOfficerLearnerConcern(resource.data.concernType))
         );
     }
 
@@ -728,18 +768,18 @@ service cloud.firestore {
     }
 
     function validLearnerCreate() {
-      return currentRole() in [
+      return hasAnyCurrentRole([
           "Principal",
           "Master Teacher",
           "Head Teacher",
           "Teacher",
           "Administrative Assistant"
-        ]
+        ])
         && validLearnerMonitoringValues()
         && request.resource.data.createdByUid == request.auth.uid
         && request.resource.data.createdByName is string
         && request.resource.data.createdByName.size() > 0
-        && request.resource.data.createdByRole == currentRole();
+        && request.resource.data.createdByRole in currentRoles();
     }
 
     function validLearnerOwnerEdit() {
@@ -747,7 +787,7 @@ service cloud.firestore {
         && validLearnerMonitoringValues()
         && (
           resource.data.createdByUid == request.auth.uid
-          || currentRole() == "Administrative Assistant"
+          || hasCurrentRole("Administrative Assistant")
         )
         && request.resource.data.createdByUid == resource.data.createdByUid
         && request.resource.data.createdByName == resource.data.createdByName
@@ -787,7 +827,7 @@ service cloud.firestore {
 
     function validLearnerInterventionUpdate() {
       return validLearnerMonitoringValues()
-        && currentRole() in ["Principal", "Master Teacher", "Head Teacher", "Registrar", "Administrative Assistant"]
+        && hasAnyCurrentRole(["Principal", "Master Teacher", "Head Teacher", "Registrar", "Administrative Assistant"])
         && canReadLearnerRecord()
         && request.resource.data.createdByUid == resource.data.createdByUid
         && request.resource.data.createdByName == resource.data.createdByName
@@ -875,7 +915,7 @@ service cloud.firestore {
         && validObservationValues()
         && request.resource.data.observerUid == request.auth.uid
         && request.resource.data.createdByUid == request.auth.uid
-        && request.resource.data.observerRole == currentRole();
+        && request.resource.data.observerRole in currentRoles();
     }
 
     function validObservationCreatorEdit() {
@@ -938,8 +978,8 @@ service cloud.firestore {
       return signedIn()
         && userDoc(request.auth.uid).data.status == "approved"
         && (
-          currentRole() == "Registrar"
-          || currentRole() == "Principal"
+          hasCurrentRole("Registrar")
+          || hasCurrentRole("Principal")
         );
     }
 
@@ -1118,16 +1158,16 @@ service cloud.firestore {
     function canReadDocument() {
       return isDocumentRole()
         && (
-          currentRole() == "Principal"
+          hasCurrentRole("Principal")
           || resource.data.uploadedByUid == request.auth.uid
-          || currentRole() in resource.data.visibilityRoles
+          || currentRoles().hasAny(resource.data.visibilityRoles)
         );
     }
 
     function canManageDocument() {
       return isDocumentRole()
         && (
-          currentRole() in ["Principal", "Administrative Assistant"]
+          hasAnyCurrentRole(["Principal", "Administrative Assistant"])
           || resource.data.uploadedByUid == request.auth.uid
         );
     }
@@ -1182,7 +1222,7 @@ service cloud.firestore {
       return isDocumentRole()
         && validDocumentValues()
         && request.resource.data.uploadedByUid == request.auth.uid
-        && request.resource.data.uploadedByRole == currentRole();
+        && request.resource.data.uploadedByRole in currentRoles();
     }
 
     function validDocumentUpdate() {
@@ -1245,14 +1285,14 @@ service cloud.firestore {
       return isInventoryFacilityManager()
         && validInventoryFacilityValues()
         && request.resource.data.encodedByUid == request.auth.uid
-        && request.resource.data.encodedByRole == currentRole();
+        && request.resource.data.encodedByRole in currentRoles();
     }
 
     function validInventoryFacilityUpdate() {
       return isInventoryFacilityManager()
         && validInventoryFacilityValues()
         && request.resource.data.encodedByUid == request.auth.uid
-        && request.resource.data.encodedByRole == currentRole()
+        && request.resource.data.encodedByRole in currentRoles()
         && request.resource.data.createdAt == resource.data.createdAt;
     }
 
@@ -1318,13 +1358,13 @@ service cloud.firestore {
       return isPpaRole()
         && validPpaValues()
         && request.resource.data.createdByUid == request.auth.uid
-        && request.resource.data.createdByRole == currentRole();
+        && request.resource.data.createdByRole in currentRoles();
     }
 
     function canUpdatePpaRecord() {
       return isPpaRole()
         && (
-          currentRole() == "Principal"
+          hasCurrentRole("Principal")
           || resource.data.createdByUid == request.auth.uid
         );
     }
@@ -1332,7 +1372,7 @@ service cloud.firestore {
     function canReadPpaRecord() {
       return isPpaRole()
         && (
-          currentRole() == "Principal"
+          hasCurrentRole("Principal")
           || resource.data.createdByUid == request.auth.uid
         );
     }
@@ -1341,7 +1381,7 @@ service cloud.firestore {
       return canUpdatePpaRecord()
         && validPpaValues()
         && (
-          currentRole() == "Principal"
+          hasCurrentRole("Principal")
           || request.resource.data.checklistIndicators == resource.data.checklistIndicators
         )
         && request.resource.data.createdByUid == resource.data.createdByUid
@@ -1422,8 +1462,8 @@ service cloud.firestore {
           resource.data.recipientUid == request.auth.uid
           || (
             userDoc(request.auth.uid).data.status == "approved"
-            && resource.data.recipientRole == currentRole()
-            && resource.data.recipientUid == "role:" + currentRole()
+            && resource.data.recipientRole in currentRoles()
+            && resource.data.recipientUid == "role:" + resource.data.recipientRole
           )
         );
     }
@@ -1437,7 +1477,7 @@ service cloud.firestore {
     function isAcademicManager() {
       return signedIn()
         && userDoc(request.auth.uid).data.status == "approved"
-        && currentRole() in ["Principal", "Registrar"];
+        && hasAnyCurrentRole(["Principal", "Registrar"]);
     }
 
     function isRegistrar() {
@@ -1447,31 +1487,31 @@ service cloud.firestore {
     function isAcademicViewer() {
       return signedIn()
         && userDoc(request.auth.uid).data.status == "approved"
-        && currentRole() in ["Principal", "Admin", "SuperAdmin", "Master Teacher", "Head Teacher", "Registrar"];
+        && hasAnyCurrentRole(["Principal", "Admin", "SuperAdmin", "Master Teacher", "Head Teacher", "Registrar"]);
     }
 
     function isTeacherAttendanceViewer() {
       return signedIn()
         && userDoc(request.auth.uid).data.status == "approved"
-        && currentRole() in ["Principal", "Registrar", "Administrative Officer", "Administrative Assistant"];
+        && hasAnyCurrentRole(["Principal", "Registrar", "Administrative Officer", "Administrative Assistant"]);
     }
 
     function isTeacherAttendanceManager() {
       return signedIn()
         && userDoc(request.auth.uid).data.status == "approved"
-        && currentRole() in ["Principal", "Administrative Officer", "Administrative Assistant"];
+        && hasAnyCurrentRole(["Principal", "Administrative Officer", "Administrative Assistant"]);
     }
 
     function isTeacherWorkloadViewer() {
       return signedIn()
         && userDoc(request.auth.uid).data.status == "approved"
-        && currentRole() in ["Principal", "Admin", "SuperAdmin", "Master Teacher", "Head Teacher", "Teacher"];
+        && hasAnyCurrentRole(["Principal", "Admin", "SuperAdmin", "Master Teacher", "Head Teacher", "Teacher"]);
     }
 
     function canReadTeacherWorkloadRecord() {
       return isTeacherWorkloadViewer()
         && (
-          currentRole() in ["Principal", "Admin", "SuperAdmin", "Master Teacher", "Head Teacher"]
+          hasAnyCurrentRole(["Principal", "Admin", "SuperAdmin", "Master Teacher", "Head Teacher"])
           || ("teacherUid" in resource.data && resource.data.teacherUid == request.auth.uid)
           || ("teacherId" in resource.data && resource.data.teacherId == request.auth.uid)
           || (
@@ -1484,13 +1524,13 @@ service cloud.firestore {
     function isGradeSubmissionViewer() {
       return signedIn()
         && userDoc(request.auth.uid).data.status == "approved"
-        && currentRole() in ["Principal", "Admin", "SuperAdmin", "Master Teacher", "Head Teacher", "Teacher"];
+        && hasAnyCurrentRole(["Principal", "Admin", "SuperAdmin", "Master Teacher", "Head Teacher", "Teacher"]);
     }
 
     function canReadGradeSubmissionRecord() {
       return isGradeSubmissionViewer()
         && (
-          currentRole() in ["Principal", "Admin", "SuperAdmin", "Master Teacher", "Head Teacher"]
+          hasAnyCurrentRole(["Principal", "Admin", "SuperAdmin", "Master Teacher", "Head Teacher"])
           || ("teacherUid" in resource.data && resource.data.teacherUid == request.auth.uid)
           || ("teacherId" in resource.data && resource.data.teacherId == request.auth.uid)
           || (
@@ -1503,7 +1543,7 @@ service cloud.firestore {
     function isAcademicMonitor() {
       return signedIn()
         && userDoc(request.auth.uid).data.status == "approved"
-        && currentRole() in ["Principal", "Master Teacher", "Head Teacher", "Registrar", "Teacher"];
+        && hasAnyCurrentRole(["Principal", "Master Teacher", "Head Teacher", "Registrar", "Teacher"]);
     }
 
     function isAssignedAdviserByResource() {
@@ -1576,8 +1616,8 @@ service cloud.firestore {
         || (
           signedIn()
           && userDoc(request.auth.uid).data.status == "approved"
-          && currentRole() in ["Master Teacher", "Head Teacher"]
-          && userDoc(ownerUid).data.role == "Teacher"
+          && hasAnyCurrentRole(["Master Teacher", "Head Teacher"])
+          && ("Teacher" in rolesForUser(ownerUid))
         );
     }
 
@@ -1787,7 +1827,7 @@ service cloud.firestore {
 
     function validGradeSubmissionWrite() {
       return isGradeSubmissionViewer()
-        && currentRole() in ["Teacher", "Master Teacher", "Head Teacher"]
+        && hasAnyCurrentRole(["Teacher", "Master Teacher", "Head Teacher"])
         && request.resource.data.keys().hasOnly([
           "workloadId",
           "teacherId",
@@ -1872,7 +1912,7 @@ service cloud.firestore {
 
     function validGradeSubmissionReviewUpdate() {
       return isGradeSubmissionViewer()
-        && currentRole() in ["Principal", "Master Teacher", "Head Teacher"]
+        && hasAnyCurrentRole(["Principal", "Master Teacher", "Head Teacher"])
         && resource.data.submissionStatus == "Submitted"
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
           "submissionStatus",
@@ -1886,7 +1926,7 @@ service cloud.firestore {
 
     function validLessonPlanSubmit() {
       return isTeacherWorkloadViewer()
-        && currentRole() in ["Teacher", "Master Teacher", "Head Teacher"]
+        && hasAnyCurrentRole(["Teacher", "Master Teacher", "Head Teacher"])
         && request.resource.data.workloadId is string
         && get(/databases/$(database)/documents/teacherWorkloads/$(request.resource.data.workloadId)).data.teacherId == request.auth.uid
         && request.resource.data.teacherId == request.auth.uid
@@ -1922,7 +1962,7 @@ service cloud.firestore {
     function validLessonPlanReviewUpdate() {
       return signedIn()
         && userDoc(request.auth.uid).data.status == "approved"
-        && currentRole() in ["Principal", "Master Teacher", "Head Teacher"]
+        && hasAnyCurrentRole(["Principal", "Master Teacher", "Head Teacher"])
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
           "status",
           "reviewTag",
@@ -1938,7 +1978,7 @@ service cloud.firestore {
         && request.resource.data.reviewerRemarks is string
         && request.resource.data.reviewedByUid == request.auth.uid
         && request.resource.data.reviewedByName is string
-        && request.resource.data.reviewedByRole == currentRole()
+        && request.resource.data.reviewedByRole in currentRoles()
         && request.resource.data.reviewedAt is timestamp
         && request.resource.data.updatedAt is timestamp;
     }
@@ -1998,7 +2038,7 @@ service cloud.firestore {
     function canWriteAssessmentRecord() {
       return signedIn()
         && userDoc(request.auth.uid).data.status == "approved"
-        && currentRole() in ["Teacher", "Master Teacher", "Head Teacher"]
+        && hasAnyCurrentRole(["Teacher", "Master Teacher", "Head Teacher"])
         && request.resource.data.teacherUid == request.auth.uid;
     }
 
@@ -2033,7 +2073,7 @@ service cloud.firestore {
         && userDoc(request.auth.uid).data.status == "approved"
         && request.resource.data.userId == request.auth.uid
         && request.resource.data.userName is string
-        && request.resource.data.role == currentRole()
+        && request.resource.data.role in currentRoles()
         && request.resource.data.action is string
         && request.resource.data.targetModule is string
         && request.resource.data.targetRecord is string
@@ -2095,21 +2135,21 @@ service cloud.firestore {
 
     match /enrollmentRecords/{recordId} {
       allow create: if validRegistrarCreate() && validEnrollmentRecordValues();
-      allow read: if isEnrollmentMonitorRole() && currentRole() != "Teacher";
+      allow read: if isEnrollmentMonitorRole() && hasAnyCurrentRole(["Principal", "Master Teacher", "Head Teacher", "Registrar"]);
       allow update: if validRegistrarUpdate() && validEnrollmentRecordValues();
       allow delete: if isApprovedPrincipal();
     }
 
     match /transferRecords/{recordId} {
       allow create: if validRegistrarCreate() && validTransferRecordValues();
-      allow read: if isEnrollmentMonitorRole() && currentRole() != "Teacher";
+      allow read: if isEnrollmentMonitorRole() && hasAnyCurrentRole(["Principal", "Master Teacher", "Head Teacher", "Registrar"]);
       allow update: if validRegistrarUpdate() && validTransferRecordValues();
       allow delete: if isApprovedPrincipal();
     }
 
     match /dropoutRecords/{recordId} {
       allow create: if validRegistrarCreate() && validDropoutRecordValues();
-      allow read: if isEnrollmentMonitorRole() && currentRole() != "Teacher";
+      allow read: if isEnrollmentMonitorRole() && hasAnyCurrentRole(["Principal", "Master Teacher", "Head Teacher", "Registrar"]);
       allow update: if validRegistrarUpdate() && validDropoutRecordValues();
       allow delete: if isApprovedPrincipal();
     }
@@ -2189,7 +2229,7 @@ service cloud.firestore {
         || (
           signedIn()
           && userDoc(request.auth.uid).data.status == "approved"
-          && currentRole() in ["Master Teacher", "Head Teacher"]
+          && hasAnyCurrentRole(["Master Teacher", "Head Teacher"])
         );
       allow update: if isTeacherAttendanceManager() && validTeacherAttendanceWrite();
       allow delete: if isApprovedPrincipal();
@@ -2234,7 +2274,7 @@ service cloud.firestore {
         && request.resource.data.createdAt is timestamp;
       allow read: if isTeacherWorkloadViewer()
         && (
-          currentRole() in ["Principal", "Master Teacher", "Head Teacher"]
+          hasAnyCurrentRole(["Principal", "Master Teacher", "Head Teacher"])
           || resource.data.teacherId == request.auth.uid
         );
       allow update: if validLessonPlanOwnerUpdate() || validLessonPlanReviewUpdate();

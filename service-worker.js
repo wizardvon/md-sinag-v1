@@ -1,11 +1,11 @@
-const CACHE_VERSION = "v19";
+const CACHE_VERSION = "v20";
 const CACHE_NAME = `sinag-cache-${CACHE_VERSION}`;
 
 const APP_SHELL_ASSETS = [
   "./",
   "./index.html",
-  "./styles.css?v=20260524-2",
-  "./app.js?v=20260524-2",
+  "./styles.css?v=20260629-roles",
+  "./app.js?v=20260629-roles",
   "./constants.js?v=20260524-2",
   "./firebase-config.js?v=20260523-2",
   "./manifest.json",

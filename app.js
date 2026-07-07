@@ -299,7 +299,81 @@ async function initializeFirebase() {
 function populateRoleOptions() {
   const options = roles.map((role) => `<option value="${role}">${role}</option>`).join("");
   els.requestedRole.innerHTML = `<option value="">Select requested role</option>${options}`;
-  els.approvalRole.innerHTML = `<option value="">Assign final role</option>${options}`;
+  els.approvalRole.innerHTML = roles
+    .map((role) => `
+      <label class="checkbox-row role-option-row">
+        <input type="checkbox" name="approvalRoles" value="${escapeHtml(role)}" />
+        <span>${escapeHtml(role)}</span>
+      </label>
+    `)
+    .join("");
+}
+
+function normalizeRoleName(role = "") {
+  const normalized = String(role).trim().toLowerCase();
+  const aliases = {
+    principal: "Principal",
+    mt: "Master Teacher",
+    "master teacher": "Master Teacher",
+    ht: "Head Teacher",
+    "head teacher": "Head Teacher",
+    teacher: "Teacher",
+    registrar: "Registrar",
+    ao: "Administrative Officer",
+    "admin officer": "Administrative Officer",
+    "administrative officer": "Administrative Officer",
+    aa: "Administrative Assistant",
+    "admin assistant": "Administrative Assistant",
+    "administrative assistant": "Administrative Assistant",
+  };
+  return aliases[normalized] || roles.find((knownRole) => knownRole.toLowerCase() === normalized) || "";
+}
+
+function normalizeRoleList(roleSource = currentUserProfile) {
+  const source = roleSource && typeof roleSource === "object" && !Array.isArray(roleSource)
+    ? [roleSource.roles, roleSource.role]
+    : [roleSource];
+  const rawRoles = source
+    .flatMap((value) => Array.isArray(value) ? value : String(value || "").split(/\s*(?:,|\/|\+|&|-)\s*/))
+    .map(normalizeRoleName)
+    .filter(Boolean);
+  return roles.filter((role) => rawRoles.includes(role));
+}
+
+function primaryRole(roleSource = currentUserProfile) {
+  return normalizeRoleList(roleSource)[0] || "";
+}
+
+function formatRoleList(roleSource = currentUserProfile) {
+  const roleList = normalizeRoleList(roleSource);
+  return roleList.length ? roleList.join(" / ") : "User";
+}
+
+function hasRole(roleSource, role) {
+  return normalizeRoleList(roleSource).includes(role);
+}
+
+function hasAnyRole(roleSource, roleList) {
+  return normalizeRoleList(roleSource).some((role) => roleList.includes(role));
+}
+
+function getModulesForRoles(roleSource = currentUserProfile) {
+  const moduleSet = new Set();
+  normalizeRoleList(roleSource).forEach((role) => {
+    (modulesByRole[role] || []).forEach((moduleName) => moduleSet.add(moduleName));
+  });
+  return [...moduleSet];
+}
+
+function getDashboardCardsForRoles(roleSource = currentUserProfile) {
+  const cardMap = new Map();
+  normalizeRoleList(roleSource).forEach((role) => {
+    const dashboardId = dashboardByRole[role];
+    (dashboardCards[dashboardId] || []).forEach((card) => {
+      if (!cardMap.has(card[0])) cardMap.set(card[0], card);
+    });
+  });
+  return [...cardMap.values()];
 }
 
 function showAuthMessage(message, isError = false) {
@@ -500,6 +574,13 @@ async function handleAuthState(user) {
   }
 
   currentUserProfile = userSnap.data();
+  const activeRoles = normalizeRoleList(currentUserProfile);
+  if (!currentUserProfile.role && activeRoles.length) {
+    currentUserProfile.role = activeRoles[0];
+  }
+  if (!Array.isArray(currentUserProfile.roles) && activeRoles.length) {
+    currentUserProfile.roles = activeRoles;
+  }
 
   if (currentUserProfile.status === "pending") {
     stopNotificationListeners();
@@ -507,7 +588,7 @@ async function handleAuthState(user) {
     return;
   }
 
-  if (currentUserProfile.status === "approved" && currentUserProfile.role) {
+  if (currentUserProfile.status === "approved" && activeRoles.length) {
     renderDashboard(currentUserProfile);
     startNotificationListeners();
     showView("dashboard");
@@ -515,17 +596,18 @@ async function handleAuthState(user) {
   }
 
   showAuthMessage(
-    `Your account is not ready yet. Expected status "approved" and a role, but found status "${currentUserProfile.status || "missing"}" and role "${currentUserProfile.role || "missing"}".`,
+    `Your account is not ready yet. Expected status "approved" and at least one role, but found status "${currentUserProfile.status || "missing"}" and roles "${formatRoleList(currentUserProfile)}".`,
     true
   );
   await signOut(auth);
 }
 
 function renderDashboard(profile) {
-  const dashboardId = dashboardByRole[profile.role] || "teacherDashboard";
-  const modules = modulesByRole[profile.role] || modulesByRole.Teacher;
+  const dashboardId = dashboardByRole[primaryRole(profile)] || "teacherDashboard";
+  const modules = getModulesForRoles(profile);
+  const roleLabel = formatRoleList(profile);
 
-  els.roleLabel.textContent = profile.role;
+  els.roleLabel.textContent = roleLabel;
   els.dashboardTitle.textContent = dashboardIdToTitle(dashboardId);
   updateTopbarProfile(profile);
   els.sidebarNav.innerHTML = modules
@@ -535,13 +617,13 @@ function renderDashboard(profile) {
     )
     .join("");
 
-  renderDashboardHome(dashboardId, profile.role);
+  renderDashboardHome(dashboardId, profile);
 }
 
 function updateTopbarProfile(profile) {
   const displayName = profile?.fullName || auth?.currentUser?.email || "Project SINAG";
   if (els.userFullName) els.userFullName.textContent = displayName;
-  if (els.userRoleName) els.userRoleName.textContent = profile?.role || "User";
+  if (els.userRoleName) els.userRoleName.textContent = formatRoleList(profile);
   if (els.userInitials) els.userInitials.textContent = getInitials(displayName);
 }
 
@@ -773,14 +855,14 @@ function clearApprovalMessage() {
 }
 
 function renderDashboardHome(dashboardId, role) {
-  const cards = dashboardCards[dashboardId] || [];
-  const availableModules = modulesByRole[role] || [];
+  const cards = getDashboardCardsForRoles(role);
+  const availableModules = getModulesForRoles(role);
   els.dashboardContent.innerHTML = `
     <section class="print-report-header dashboard-overview">
       <div>
         <p class="eyebrow">Project SINAG</p>
         <h2>${escapeHtml(dashboardIdToTitle(dashboardId))}</h2>
-        <p>${escapeHtml(role)} view for ${escapeHtml(currentUserProfile?.fullName || "User")}</p>
+        <p>${escapeHtml(formatRoleList(role))} view for ${escapeHtml(currentUserProfile?.fullName || "User")}</p>
       </div>
       <div class="dashboard-stamp">
         <span>Updated</span>
@@ -852,7 +934,6 @@ function renderDashboardStatCard(label, value, availableModules) {
           <span class="stat-icon" aria-hidden="true">${getModuleIcon(moduleName || label)}</span>
           <span>${escapeHtml(label)}</span>
         </div>
-        ${canOpenModule ? `<b>${escapeHtml(moduleName)}</b>` : ""}
       </div>
       <div class="stat-card-metrics">${renderDashboardMetricMarkup(label, value, metricParts)}</div>
     </article>
@@ -866,7 +947,6 @@ function renderDashboardMetricMarkup(label, value, metricParts = getDashboardMet
         ${metricParts.map((part) => `
           <div>
             <strong>${escapeHtml(part.value)}</strong>
-            <small>${escapeHtml(part.label)}</small>
           </div>
         `).join("")}
       </div>
@@ -984,12 +1064,12 @@ async function refreshDashboardCalendar(role) {
 async function getUserCalendarItems(user) {
   if (!user || !auth) return [];
 
-  const canUseReports = user.role === "Principal" || complianceRoles.includes(user.role);
+  const canUseReports = hasRole(user, "Principal") || hasAnyRole(user, complianceRoles);
   const [reports, observations, learners, approvalItems, personalItems] = await Promise.all([
     canUseReports ? getVisibleReportAssignments() : Promise.resolve([]),
-    observationRoles.includes(user.role) ? getVisibleClassroomObservations() : Promise.resolve([]),
-    learnerMonitorRoles.includes(user.role) ? getVisibleLearnerRecords() : Promise.resolve([]),
-    user.role === "Principal" ? getPendingApprovalCalendarItems() : Promise.resolve([]),
+    hasAnyRole(user, observationRoles) ? getVisibleClassroomObservations() : Promise.resolve([]),
+    hasAnyRole(user, learnerMonitorRoles) ? getVisibleLearnerRecords() : Promise.resolve([]),
+    hasRole(user, "Principal") ? getPendingApprovalCalendarItems() : Promise.resolve([]),
     getCalendarEventsForUser(auth.currentUser.uid).catch(() => []),
   ]);
 
@@ -1289,7 +1369,8 @@ async function getCalendarPersonnelOptions() {
     uid: auth.currentUser.uid,
     fullName: currentUserProfile.fullName || auth.currentUser.email,
     email: currentUserProfile.email || auth.currentUser.email,
-    role: currentUserProfile.role,
+    role: formatRoleList(currentUserProfile),
+    roles: normalizeRoleList(currentUserProfile),
   };
   if (!canSelectCalendarOwner()) return [self];
 
@@ -1300,14 +1381,13 @@ async function getCalendarPersonnelOptions() {
 }
 
 function canSelectCalendarOwner(role = currentUserProfile?.role) {
-  return ["Principal", "Admin", "SuperAdmin", "Master Teacher", "Head Teacher"].includes(role);
+  return hasAnyRole(role, ["Principal", "Admin", "SuperAdmin", "Master Teacher", "Head Teacher"]);
 }
 
 function canViewCalendarUser(user) {
-  const role = currentUserProfile?.role || "";
   if (!user || (user.uid || user.id) === auth.currentUser?.uid) return true;
-  if (["Principal", "Admin", "SuperAdmin"].includes(role)) return true;
-  if (["Master Teacher", "Head Teacher"].includes(role)) return user.role === "Teacher";
+  if (hasAnyRole(currentUserProfile, ["Principal", "Admin", "SuperAdmin"])) return true;
+  if (hasAnyRole(currentUserProfile, ["Master Teacher", "Head Teacher"])) return hasRole(user, "Teacher");
   return false;
 }
 
@@ -1711,7 +1791,9 @@ function updatePendingApprovalCard(count) {
 function openApprovalModal(docId, name) {
   currentApprovalDocId = docId;
   els.approvalUserName.textContent = name;
-  els.approvalRole.value = "";
+  els.approvalRole.querySelectorAll("input[name='approvalRoles']").forEach((input) => {
+    input.checked = false;
+  });
   clearApprovalMessage();
   els.approvalModal.classList.remove("hidden");
 }
@@ -1723,11 +1805,15 @@ function closeApprovalModal() {
 
 async function handleApproval(event) {
   event.preventDefault();
-  const selectedRole = els.approvalRole.value;
+  const selectedRoles = [...els.approvalRole.querySelectorAll("input[name='approvalRoles']:checked")]
+    .map((input) => input.value)
+    .filter((role) => roles.includes(role));
+  const selectedRole = selectedRoles[0] || "";
+  const selectedRoleLabel = selectedRoles.join(" / ");
   clearApprovalMessage();
 
-  if (!currentApprovalDocId || !selectedRole) {
-    showApprovalMessage("Select a user and final role before approving.", true);
+  if (!currentApprovalDocId || !selectedRoles.length) {
+    showApprovalMessage("Select at least one final role before approving.", true);
     return;
   }
 
@@ -1738,11 +1824,12 @@ async function handleApproval(event) {
   try {
     const approvedUserSnap = await getDoc(doc(db, "users", currentApprovalDocId));
     const approvedUser = approvedUserSnap.exists()
-      ? { uid: currentApprovalDocId, ...approvedUserSnap.data(), role: selectedRole }
+      ? { uid: currentApprovalDocId, ...approvedUserSnap.data(), role: selectedRole, roles: selectedRoles }
       : null;
     // Approval assigns the final role and unlocks dashboard access.
     await updateDoc(doc(db, "users", currentApprovalDocId), {
       role: selectedRole,
+      roles: selectedRoles,
       status: "approved",
       approvedAt: serverTimestamp(),
       approvedBy: auth.currentUser.uid,
@@ -1750,7 +1837,7 @@ async function handleApproval(event) {
     await createDirectNotification(approvedUser, {
       notificationType: "user_approved",
       title: "Account approved",
-      message: `Your Project SINAG account was approved as ${selectedRole}.`,
+      message: `Your Project SINAG account was approved as ${selectedRoleLabel}.`,
       relatedModule: "Dashboard",
       relatedRecordId: currentApprovalDocId,
       actionUrl: "#Dashboard",
@@ -1777,7 +1864,7 @@ function renderModulePlaceholder(moduleName) {
       <h2>${moduleName}</h2>
       <p>
         ${moduleName} is available as a Phase 1 navigation placeholder for
-        ${currentUserProfile?.role || "this role"}. Its detailed records,
+        ${formatRoleList(currentUserProfile)}. Its detailed records,
         forms, analytics, and workflows are reserved for future phases.
       </p>
     </section>
@@ -1785,10 +1872,10 @@ function renderModulePlaceholder(moduleName) {
 }
 
 function getDownloadableReportDefinitions() {
-  const role = currentUserProfile?.role || "";
+  const role = currentUserProfile || "";
   const definitions = [];
 
-  if (role === "Principal" || complianceRoles.includes(role)) {
+  if (hasRole(role, "Principal") || hasAnyRole(role, complianceRoles)) {
     definitions.push({
       id: "reportAssignments",
       label: "Report Assignment",
@@ -1822,7 +1909,7 @@ function getDownloadableReportDefinitions() {
     });
   }
 
-  if (learnerMonitorRoles.includes(role)) {
+  if (hasAnyRole(role, learnerMonitorRoles)) {
     definitions.push({
       id: "learnerMonitoring",
       label: "Learner Monitoring",
@@ -1846,7 +1933,7 @@ function getDownloadableReportDefinitions() {
     });
   }
 
-  if (observationRoles.includes(role)) {
+  if (hasAnyRole(role, observationRoles)) {
     definitions.push({
       id: "classroomObservations",
       label: "Classroom Observation",
@@ -1869,7 +1956,7 @@ function getDownloadableReportDefinitions() {
     });
   }
 
-  if (canViewEnrollmentModule(role) && role !== "Teacher") {
+  if (hasAnyRole(role, ["Principal", "Master Teacher", "Head Teacher", "Registrar"])) {
     definitions.push({
       id: "enrollmentRecords",
       label: "Enrollment Records",
@@ -1895,7 +1982,7 @@ function getDownloadableReportDefinitions() {
     });
   }
 
-  if (documentRoles.includes(role)) {
+  if (hasAnyRole(role, documentRoles)) {
     definitions.push({
       id: "documents",
       label: "Document Repository",
@@ -1919,7 +2006,7 @@ function getDownloadableReportDefinitions() {
     });
   }
 
-  if (inventoryFacilityRoles.includes(role)) {
+  if (hasAnyRole(role, inventoryFacilityRoles)) {
     definitions.push({
       id: "inventoryFacilities",
       label: "Inventory & Facilities",
@@ -1943,7 +2030,7 @@ function getDownloadableReportDefinitions() {
     });
   }
 
-  if (financialReportRoles.includes(role)) {
+  if (hasAnyRole(role, financialReportRoles)) {
     definitions.push({
       id: "financialReports",
       label: "Financial Report",
@@ -1985,7 +2072,7 @@ function getDownloadableReportDefinitions() {
     });
   }
 
-  if (ppaRoles.includes(role)) {
+  if (hasAnyRole(role, ppaRoles)) {
     definitions.push({
       id: "ppaMonitoring",
       label: "PPA Monitoring and Evaluation",
@@ -2105,7 +2192,7 @@ function getDownloadableReportDefinitions() {
     );
   }
 
-  if (teacherAttendanceViewerRoles.includes(role)) {
+  if (hasAnyRole(role, teacherAttendanceViewerRoles)) {
     definitions.push({
       id: "teacherAttendance",
       label: "Teacher Attendance",
@@ -2523,7 +2610,7 @@ function buildNotificationPayload({
     recipientRole,
     senderUid: auth.currentUser.uid,
     senderName: senderName || currentUserProfile?.fullName || auth.currentUser.email || "System user",
-    senderRole: senderRole || currentUserProfile?.role || currentUserProfile?.requestedRole || "Pending User",
+    senderRole: senderRole || primaryRole(currentUserProfile) || currentUserProfile?.requestedRole || "Pending User",
     notificationType,
     title,
     message,
@@ -2560,12 +2647,12 @@ async function createRoleNotifications(rolesToNotify, notification) {
 }
 
 async function createDirectNotification(user, notification) {
-  if (!user?.uid || !user?.role) return null;
+  if (!user?.uid || !normalizeRoleList(user).length) return null;
   return createNotification({
     ...notification,
     recipientUid: user.uid,
     recipientName: user.fullName || user.email || "SINAG user",
-    recipientRole: user.role,
+    recipientRole: primaryRole(user),
   });
 }
 
@@ -2577,7 +2664,7 @@ function stopNotificationListeners() {
 
 function startNotificationListeners() {
   stopNotificationListeners();
-  if (!db || !auth?.currentUser || !currentUserProfile?.role) return;
+  if (!db || !auth?.currentUser || !normalizeRoleList(currentUserProfile).length) return;
 
   const buckets = new Map();
   const syncNotifications = (key, snapshot) => {
@@ -2604,10 +2691,12 @@ function startNotificationListeners() {
       (snapshot) => syncNotifications("direct", snapshot),
       handleNotificationError("direct")
     ),
-    onSnapshot(
-      query(collection(db, "notifications"), where("recipientUid", "==", notificationRecipientKey(currentUserProfile.role))),
-      (snapshot) => syncNotifications("role", snapshot),
-      handleNotificationError("role")
+    ...normalizeRoleList(currentUserProfile).map((role) =>
+      onSnapshot(
+        query(collection(db, "notifications"), where("recipientUid", "==", notificationRecipientKey(role))),
+        (snapshot) => syncNotifications(`role:${role}`, snapshot),
+        handleNotificationError(`role ${role}`)
+      )
     ),
   ];
 }
@@ -2677,13 +2766,13 @@ function navigateToModule(moduleName) {
 }
 
 function canCreateAssignments(role = currentUserProfile?.role) {
-  return assignmentCreatorRoles.includes(role);
+  return hasAnyRole(role, assignmentCreatorRoles);
 }
 
 function canUserBeAssigned(user) {
   if (!user || user.status !== "approved") return false;
-  if (currentUserProfile.role === "Principal") return roles.includes(user.role);
-  return complianceRoles.filter((role) => role !== "Master Teacher" && role !== "Head Teacher").includes(user.role);
+  if (hasRole(currentUserProfile, "Principal")) return hasAnyRole(user, roles);
+  return hasAnyRole(user, complianceRoles.filter((role) => role !== "Master Teacher" && role !== "Head Teacher"));
 }
 
 function assignmentGroupOptions() {
@@ -2701,7 +2790,7 @@ function assigneeUidsForGroup(groupValue) {
   const group = assignmentGroupOptions().find((option) => option.value === groupValue);
   if (!group) return [];
   return assignableUsersCache
-    .filter((user) => group.roles.includes(user.role))
+    .filter((user) => hasAnyRole(user, group.roles))
     .map((user) => user.uid);
 }
 
@@ -2722,7 +2811,7 @@ function canSubmitAssignment(record) {
 function canReviewAssignment(record) {
   return (
     record.assignedByUid === auth.currentUser.uid ||
-    currentUserProfile.role === "Principal"
+    hasRole(currentUserProfile, "Principal")
   );
 }
 
@@ -2755,10 +2844,10 @@ async function createReportAssignments(record) {
           totalAssignedCount: selectedUsers.length,
           assignedByUid: auth.currentUser.uid,
           assignedByName: currentUserProfile.fullName,
-          assignedByRole: currentUserProfile.role,
+          assignedByRole: primaryRole(currentUserProfile),
           assignedToUid: user.uid,
           assignedToName: user.fullName,
-          assignedToRole: user.role,
+          assignedToRole: primaryRole(user),
           dueDate: record.dueDate,
           allowedSubmissionTypes: record.allowedSubmissionTypes,
           status: "Assigned",
@@ -2806,7 +2895,7 @@ async function getAllReportAssignments() {
 }
 
 async function getVisibleReportAssignments() {
-  if (currentUserProfile.role === "Principal") {
+  if (hasRole(currentUserProfile, "Principal")) {
     return getAllReportAssignments();
   }
 
@@ -2885,7 +2974,7 @@ async function updateReportAssignmentStatus(recordId, status, reviewRemarks) {
 }
 
 async function refreshComplianceCounters(role) {
-  if (!db || !auth || !role || !complianceRoles.includes(role)) return;
+  if (!db || !auth || !role || !hasAnyRole(role, complianceRoles)) return;
 
   try {
     const records = await getVisibleReportAssignments();
@@ -2894,7 +2983,7 @@ async function refreshComplianceCounters(role) {
     const countByStatus = (items, status) => items.filter((record) => record.status === status).length;
     const pendingStatuses = ["Assigned", "Returned for Revision", "Late", "Not Submitted"];
 
-    if (role === "Principal") {
+    if (hasRole(role, "Principal")) {
       const pending = records.filter((record) => pendingStatuses.includes(record.status)).length;
       updateCardValue("Report Assignment", `${records.length}/${pending}`);
       updateCardValue("Total Assigned Reports", records.length);
@@ -2902,7 +2991,7 @@ async function refreshComplianceCounters(role) {
       updateCardValue("Submitted Reports", countByStatus(records, "Submitted"));
       updateCardValue("Approved Reports", countByStatus(records, "Approved"));
       updateCardValue("Late Reports", countByStatus(records, "Late"));
-    } else if (assignmentCreatorRoles.includes(role)) {
+    } else if (hasAnyRole(role, assignmentCreatorRoles)) {
       const pending = assignedByMe.filter((record) => pendingStatuses.includes(record.status)).length;
       const submitted = countByStatus(assignedByMe, "Submitted");
       updateCardValue("Report Assignment", `${submitted}/${pending}`);
@@ -2915,7 +3004,7 @@ async function refreshComplianceCounters(role) {
 
     const myPending = mine.filter((record) => pendingStatuses.includes(record.status)).length;
     updateCardValue("My Report Assignment", `${mine.length}/${myPending}`);
-    if (role === "Administrative Officer") {
+    if (hasRole(role, "Administrative Officer")) {
       updateCardValue("Report Assignment", `${mine.length}/${myPending}`);
     }
     updateCardValue("My Assigned Reports", mine.length);
@@ -2943,20 +3032,20 @@ async function refreshComplianceCounters(role) {
 }
 
 function canCreateLearnerRecord(role = currentUserProfile?.role) {
-  return learnerCreatorRoles.includes(role);
+  return hasAnyRole(role, learnerCreatorRoles);
 }
 
 function canEditLearnerRecord(record) {
   return (
     record.createdByUid === auth.currentUser.uid ||
-    currentUserProfile.role === "Administrative Assistant"
+    hasRole(currentUserProfile, "Administrative Assistant")
   );
 }
 
 function canUpdateLearnerIntervention(record) {
   return (
     canEditLearnerRecord(record) ||
-    ["Principal", "Master Teacher", "Head Teacher", "Registrar"].includes(currentUserProfile.role)
+    hasAnyRole(currentUserProfile, ["Principal", "Master Teacher", "Head Teacher", "Registrar"])
   );
 }
 
@@ -2968,7 +3057,7 @@ async function createLearnerMonitoringRecord(record) {
       adviserName: record.adviserName || currentUserProfile.fullName,
       createdByUid: auth.currentUser.uid,
       createdByName: currentUserProfile.fullName,
-      createdByRole: currentUserProfile.role,
+      createdByRole: primaryRole(currentUserProfile),
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });
@@ -3020,19 +3109,19 @@ async function getAllLearnerRecords() {
 }
 
 async function getVisibleLearnerRecords() {
-  if (["Principal", "Master Teacher", "Head Teacher", "Administrative Assistant"].includes(currentUserProfile.role)) {
+  if (hasAnyRole(currentUserProfile, ["Principal", "Master Teacher", "Head Teacher", "Administrative Assistant"])) {
     return getAllLearnerRecords();
   }
 
-  if (currentUserProfile.role === "Teacher") {
+  if (hasRole(currentUserProfile, "Teacher")) {
     return getMyLearnerRecords();
   }
 
-  if (currentUserProfile.role === "Registrar") {
+  if (hasRole(currentUserProfile, "Registrar")) {
     return getLearnerRecordsByConcernTypes(registrarConcernTypes);
   }
 
-  if (currentUserProfile.role === "Administrative Officer") {
+  if (hasRole(currentUserProfile, "Administrative Officer")) {
     return getLearnerRecordsByConcernTypes(administrativeOfficerConcernTypes);
   }
 
@@ -3040,7 +3129,7 @@ async function getVisibleLearnerRecords() {
 }
 
 async function refreshLearnerCounters(role) {
-  if (!db || !auth || !learnerMonitorRoles.includes(role)) return;
+  if (!db || !auth || !hasAnyRole(role, learnerMonitorRoles)) return;
 
   try {
     const records = await getVisibleLearnerRecords();
@@ -3050,7 +3139,7 @@ async function refreshLearnerCounters(role) {
     const resolved = records.filter((record) => record.status === "Resolved" || record.interventionStatus === "Resolved");
     const concernCount = (concerns) => records.filter((record) => concerns.includes(record.concernType)).length;
 
-    if (role === "Teacher") {
+    if (hasRole(role, "Teacher")) {
       updateCardValue("My Learner Monitoring", `${active.length}/${highRisk.length}`);
       updateCardValue("My Learners-at-Risk", active.length);
       updateCardValue("My Red Risk Learners", highRisk.length);
@@ -3058,14 +3147,14 @@ async function refreshLearnerCounters(role) {
       updateCardValue("Resolved Cases", resolved.length);
       updateCardValue("Learners-at-Risk", active.length);
       updateCardValue("Incomplete Requirements", concernCount(["Incomplete Requirements"]));
-    } else if (["Master Teacher", "Head Teacher"].includes(role)) {
+    } else if (hasAnyRole(role, ["Master Teacher", "Head Teacher"])) {
       updateCardValue("Learner Monitoring", `${active.length}/${highRisk.length}`);
       updateCardValue("Learners Under Monitoring", active.length);
       updateCardValue("Red Risk Learners", highRisk.length);
       updateCardValue("Ongoing Interventions", ongoing.length);
       updateCardValue("Resolved Cases", resolved.length);
       updateCardValue("Learners-at-Risk", active.length);
-    } else if (role === "Principal") {
+    } else if (hasRole(role, "Principal")) {
       updateCardValue("Learner Monitoring", `${active.length}/${highRisk.length}`);
       updateCardValue("Total Learners-at-Risk", active.length);
       updateCardValue("Red Risk Learners", highRisk.length);
@@ -3075,13 +3164,13 @@ async function refreshLearnerCounters(role) {
       updateCardValue("Learners-at-Risk", active.length);
       updateCardValue("Dropout Summary", concernCount(["Dropout Risk"]));
       updateCardValue("Transfer Summary", concernCount(["Transfer Concern"]));
-    } else if (role === "Registrar") {
+    } else if (hasRole(role, "Registrar")) {
       updateCardValue("Learner Monitoring", `${concernCount(["Dropout Risk", "Transfer Concern"])}/${concernCount(["Incomplete Requirements", "Other"])}`);
       updateCardValue("Dropout Risk Records", concernCount(["Dropout Risk"]));
       updateCardValue("Transfer Concern Records", concernCount(["Transfer Concern"]));
       updateCardValue("Class Profile Concerns", concernCount(["Incomplete Requirements", "Other"]));
       updateCardValue("Dropout Count", concernCount(["Dropout Risk"]));
-    } else if (role === "Administrative Officer" || role === "Administrative Assistant") {
+    } else if (hasAnyRole(role, ["Administrative Officer", "Administrative Assistant"])) {
       updateCardValue("Learner Monitoring", `${active.length}/${highRisk.length}`);
     }
   } catch (error) {
@@ -3090,15 +3179,15 @@ async function refreshLearnerCounters(role) {
 }
 
 function canCreateObservation(role = currentUserProfile?.role) {
-  return observationCreatorRoles.includes(role);
+  return hasAnyRole(role, observationCreatorRoles);
 }
 
 function canEditObservation(record) {
-  return currentUserProfile.role === "Principal" || record.createdByUid === auth.currentUser.uid;
+  return hasRole(currentUserProfile, "Principal") || record.createdByUid === auth.currentUser.uid;
 }
 
 function canUpdateObservation(record) {
-  return currentUserProfile.role === "Principal" || record.observerUid === auth.currentUser.uid;
+  return hasRole(currentUserProfile, "Principal") || record.observerUid === auth.currentUser.uid;
 }
 
 function canAddPreObservationNotes(record) {
@@ -3106,14 +3195,14 @@ function canAddPreObservationNotes(record) {
 }
 
 async function getObservationTeacherOptions() {
-  const observableRoles = currentUserProfile?.role === "Principal"
+  const observableRoles = hasRole(currentUserProfile, "Principal")
     ? ["Master Teacher", "Head Teacher", "Teacher"]
     : ["Teacher"];
   const usersQuery = query(collection(db, "users"), where("status", "==", "approved"));
   const snapshot = await getDocs(usersQuery);
   return snapshot.docs
     .map((userDoc) => ({ id: userDoc.id, ...userDoc.data() }))
-    .filter((user) => observableRoles.includes(user.role) && (user.uid || user.id) !== auth.currentUser.uid)
+    .filter((user) => hasAnyRole(user, observableRoles) && (user.uid || user.id) !== auth.currentUser.uid)
     .sort((a, b) =>
       (a.role || "").localeCompare(b.role || "") ||
       (a.fullName || a.email || "").localeCompare(b.fullName || b.email || "")
@@ -3126,7 +3215,7 @@ async function createClassroomObservation(record) {
       ...record,
       observerUid: auth.currentUser.uid,
       observerName: currentUserProfile.fullName,
-      observerRole: currentUserProfile.role,
+      observerRole: primaryRole(currentUserProfile),
       createdByUid: auth.currentUser.uid,
       createdByName: currentUserProfile.fullName,
       createdAt: serverTimestamp(),
@@ -3186,7 +3275,7 @@ async function getAllClassroomObservations() {
 }
 
 async function getVisibleClassroomObservations() {
-  if (currentUserProfile.role === "Principal") {
+  if (hasRole(currentUserProfile, "Principal")) {
     return getAllClassroomObservations();
   }
 
@@ -3198,7 +3287,7 @@ async function getVisibleClassroomObservations() {
     return [...new Map([...createdByMe, ...scheduledForMe].map((record) => [record.id, record])).values()];
   }
 
-  if (currentUserProfile.role === "Teacher") {
+  if (hasRole(currentUserProfile, "Teacher")) {
     return getMyObservationSchedules();
   }
 
@@ -3206,7 +3295,7 @@ async function getVisibleClassroomObservations() {
 }
 
 async function refreshObservationCounters(role) {
-  if (!db || !auth || !observationRoles.includes(role)) return;
+  if (!db || !auth || !hasAnyRole(role, observationRoles)) return;
 
   try {
     const records = await getVisibleClassroomObservations();
@@ -3232,7 +3321,7 @@ function canManageEnrollmentRecords() {
 }
 
 function canViewEnrollmentModule(role = currentUserProfile?.role) {
-  return enrollmentMonitorRoles.includes(role);
+  return hasAnyRole(role, enrollmentMonitorRoles);
 }
 
 function availableEnrollmentViews() {
@@ -3341,33 +3430,33 @@ async function refreshEnrollmentCounters(role) {
 }
 
 function canViewDocumentRepository(role = currentUserProfile?.role) {
-  return documentRoles.includes(role);
+  return hasAnyRole(role, documentRoles);
 }
 
 function canManageDocument(record = null) {
   if (!currentUserProfile) return false;
-  if (["Principal", "Administrative Assistant"].includes(currentUserProfile.role)) return true;
-  return record ? record.uploadedByUid === auth.currentUser.uid : documentRoles.includes(currentUserProfile.role);
+  if (hasAnyRole(currentUserProfile, ["Principal", "Administrative Assistant"])) return true;
+  return record ? record.uploadedByUid === auth.currentUser.uid : hasAnyRole(currentUserProfile, documentRoles);
 }
 
 function canDeleteDocument(record) {
-  return ["Principal", "Administrative Assistant"].includes(currentUserProfile.role) || record.uploadedByUid === auth.currentUser.uid;
+  return hasAnyRole(currentUserProfile, ["Principal", "Administrative Assistant"]) || record.uploadedByUid === auth.currentUser.uid;
 }
 
 function canSeeDocument(record) {
   return (
-    currentUserProfile.role === "Principal" ||
+    hasRole(currentUserProfile, "Principal") ||
     record.uploadedByUid === auth.currentUser.uid ||
-    (record.visibilityRoles || []).includes(currentUserProfile.role)
+    normalizeRoleList(currentUserProfile).some((role) => (record.visibilityRoles || []).includes(role))
   );
 }
 
 async function getVisibleDocuments() {
   const documentsRef = collection(db, "documents");
   const documentsQuery =
-    currentUserProfile.role === "Principal"
+    hasRole(currentUserProfile, "Principal")
       ? documentsRef
-      : query(documentsRef, where("visibilityRoles", "array-contains", currentUserProfile.role));
+      : query(documentsRef, where("visibilityRoles", "array-contains-any", normalizeRoleList(currentUserProfile)));
   const snapshot = await getDocs(documentsQuery);
   return snapshot.docs.map(normalizeRecord).filter(canSeeDocument);
 }
@@ -3378,7 +3467,7 @@ async function createDocumentRecord(record) {
       ...record,
       uploadedByUid: auth.currentUser.uid,
       uploadedByName: currentUserProfile.fullName,
-      uploadedByRole: currentUserProfile.role,
+      uploadedByRole: primaryRole(currentUserProfile),
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });
@@ -3437,11 +3526,11 @@ async function refreshDocumentCounters(role) {
 }
 
 function canViewInventoryFacilities(role = currentUserProfile?.role) {
-  return inventoryFacilityRoles.includes(role);
+  return hasAnyRole(role, inventoryFacilityRoles);
 }
 
 function canManageInventoryFacilities(role = currentUserProfile?.role) {
-  return inventoryFacilityManagerRoles.includes(role);
+  return hasAnyRole(role, inventoryFacilityManagerRoles);
 }
 
 async function getVisibleInventoryFacilities() {
@@ -3451,7 +3540,7 @@ async function getVisibleInventoryFacilities() {
 }
 
 async function refreshInventoryFacilityCounters(role) {
-  if (!db || !auth || !inventoryFacilityRoles.includes(role)) return;
+  if (!db || !auth || !hasAnyRole(role, inventoryFacilityRoles)) return;
 
   try {
     const records = await getVisibleInventoryFacilities();
@@ -3474,15 +3563,15 @@ async function refreshInventoryFacilityCounters(role) {
 }
 
 function canViewFinancialReports(role = currentUserProfile?.role) {
-  return financialReportRoles.includes(role);
+  return hasAnyRole(role, financialReportRoles);
 }
 
 function canManageFinancialReports(role = currentUserProfile?.role) {
-  return financialReportManagerRoles.includes(role);
+  return hasAnyRole(role, financialReportManagerRoles);
 }
 
 function canReviewFinancialReports(role = currentUserProfile?.role) {
-  return financialReportReviewerRoles.includes(role);
+  return hasAnyRole(role, financialReportReviewerRoles);
 }
 
 function canEditFinancialReport(record) {
@@ -3574,28 +3663,28 @@ async function refreshFinancialReportCounters(role) {
 }
 
 function canViewPpaModule(role = currentUserProfile?.role) {
-  return ppaRoles.includes(role);
+  return hasAnyRole(role, ppaRoles);
 }
 
 function canCreatePpaRecord(role = currentUserProfile?.role) {
-  return ppaRoles.includes(role);
+  return hasAnyRole(role, ppaRoles);
 }
 
 function canEditPpaRecord(record) {
   if (!currentUserProfile || !record) return false;
   return (
-    currentUserProfile.role === "Principal" ||
+    hasRole(currentUserProfile, "Principal") ||
     record.createdByUid === auth.currentUser.uid
   );
 }
 
 function canDeletePpaRecord() {
-  return currentUserProfile?.role === "Principal";
+  return hasRole(currentUserProfile, "Principal");
 }
 
 function canSeePpaRecord(record) {
   if (!currentUserProfile || !record) return false;
-  return currentUserProfile.role === "Principal" || record.createdByUid === auth.currentUser.uid;
+  return hasRole(currentUserProfile, "Principal") || record.createdByUid === auth.currentUser.uid;
 }
 
 function ppaTermLabel(value = "") {
@@ -3609,7 +3698,7 @@ function ppaTermLabel(value = "") {
 async function getVisiblePpaRecords() {
   if (!canViewPpaModule()) return [];
   const source = collection(db, "ppaMonitoring");
-  const snapshot = currentUserProfile?.role === "Principal"
+  const snapshot = hasRole(currentUserProfile, "Principal")
     ? await getDocs(source)
     : await getDocs(query(source, where("createdByUid", "==", auth.currentUser.uid)));
   return snapshot.docs.map(normalizeRecord).filter(canSeePpaRecord);
@@ -3621,7 +3710,7 @@ async function createPpaRecord(record) {
       ...record,
       createdByUid: auth.currentUser.uid,
       createdByName: currentUserProfile.fullName,
-      createdByRole: currentUserProfile.role,
+      createdByRole: primaryRole(currentUserProfile),
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });
@@ -3664,7 +3753,7 @@ async function refreshPpaCounters(role) {
 }
 
 async function refreshUserCounters(role) {
-  if (!db || role !== "Principal") return;
+  if (!db || !hasRole(role, "Principal")) return;
 
   try {
     const snapshot = await getDocs(collection(db, "users"));
@@ -3672,7 +3761,7 @@ async function refreshUserCounters(role) {
     const pending = users.filter((user) => user.status === "pending").length;
     updateCardValue("Users & Approvals", `${users.length}/${pending}`);
     updateCardValue("Total Users", users.length);
-    updateCardValue("Total Teachers", users.filter((user) => user.role === "Teacher" && user.status === "approved").length);
+    updateCardValue("Total Teachers", users.filter((user) => hasRole(user, "Teacher") && user.status === "approved").length);
     updateCardValue("Pending User Approvals", pending);
   } catch (error) {
     console.warn("Unable to load user counters:", error);
@@ -3680,23 +3769,23 @@ async function refreshUserCounters(role) {
 }
 
 function canManageClasses(role = currentUserProfile?.role) {
-  return academicManagerRoles.includes(role);
+  return hasAnyRole(role, academicManagerRoles);
 }
 
 function canManageStudents(role = currentUserProfile?.role) {
-  return role === "Registrar" || role === "Principal";
+  return hasAnyRole(role, ["Registrar", "Principal"]);
 }
 
 function canViewAcademicModule(role = currentUserProfile?.role) {
-  return academicMonitorRoles.includes(role);
+  return hasAnyRole(role, academicMonitorRoles);
 }
 
 function canViewAllAcademic(role = currentUserProfile?.role) {
-  return academicViewerRoles.includes(role);
+  return hasAnyRole(role, academicViewerRoles);
 }
 
 function canEncodeAssessmentScores() {
-  return Boolean(auth?.currentUser?.uid && ["Teacher", "Master Teacher", "Head Teacher"].includes(currentUserProfile?.role));
+  return Boolean(auth?.currentUser?.uid && hasAnyRole(currentUserProfile, ["Teacher", "Master Teacher", "Head Teacher"]));
 }
 
 function canEditSectionRecords(sectionId) {
@@ -3712,7 +3801,7 @@ function canEditAssessmentRecord(record = {}) {
 }
 
 async function getVisibleSectionScopedRecords(collectionName) {
-  if (currentUserProfile?.role !== "Teacher") {
+  if (!hasRole(currentUserProfile, "Teacher") || canViewAllAcademic()) {
     const snapshot = await getDocs(collection(db, collectionName));
     return snapshot.docs.map(normalizeRecord);
   }
@@ -3726,7 +3815,7 @@ async function getVisibleSectionScopedRecords(collectionName) {
 }
 
 async function getVisibleClasses() {
-  const classQuery = currentUserProfile?.role === "Teacher"
+  const classQuery = hasRole(currentUserProfile, "Teacher") && !canViewAllAcademic()
     ? query(collection(db, "classes"), where("adviserId", "==", auth.currentUser.uid))
     : collection(db, "classes");
   const snapshot = await getDocs(classQuery);
@@ -3742,7 +3831,7 @@ async function getVisibleStudentAttendance() {
 }
 
 async function getVisibleAssessments() {
-  if (currentUserProfile?.role !== "Teacher") {
+  if (!hasRole(currentUserProfile, "Teacher") || canViewAllAcademic()) {
     const snapshot = await getDocs(collection(db, "assessments"));
     return snapshot.docs.map(normalizeRecord);
   }
@@ -3758,7 +3847,7 @@ async function getVisibleAssessments() {
 }
 
 async function getAssessmentVisibleClasses() {
-  if (currentUserProfile?.role !== "Teacher") return getVisibleClasses();
+  if (!hasRole(currentUserProfile, "Teacher") || canViewAllAcademic()) return getVisibleClasses();
   const [adviserClasses, workloads] = await Promise.all([
     getVisibleClasses(),
     getVisibleTeacherWorkloadRecords(),
@@ -3778,24 +3867,24 @@ async function getAssessmentVisibleClasses() {
 }
 
 async function getAssessmentVisibleStudents(classes = classRecordsCache) {
-  if (currentUserProfile?.role !== "Teacher") return getVisibleStudents();
+  if (!hasRole(currentUserProfile, "Teacher") || canViewAllAcademic()) return getVisibleStudents();
   const sectionIds = new Set(classes.map((record) => record.id));
   const snapshot = await getDocs(collection(db, "students"));
   return snapshot.docs.map(normalizeRecord).filter((record) => sectionIds.has(record.sectionId));
 }
 
 async function getVisibleTeacherAttendance() {
-  if (!teacherAttendanceViewerRoles.includes(currentUserProfile?.role)) return [];
+  if (!hasAnyRole(currentUserProfile, teacherAttendanceViewerRoles)) return [];
   const snapshot = await getDocs(collection(db, "teacherAttendance"));
   return snapshot.docs.map(normalizeRecord);
 }
 
 function canManageTeacherAttendance(role = currentUserProfile?.role) {
-  return ["Principal", "Administrative Officer", "Administrative Assistant"].includes(role);
+  return hasAnyRole(role, ["Principal", "Administrative Officer", "Administrative Assistant"]);
 }
 
 async function refreshTeacherAttendanceCounters(role) {
-  if (!db || !auth || !teacherAttendanceViewerRoles.includes(role)) return;
+  if (!db || !auth || !hasAnyRole(role, teacherAttendanceViewerRoles)) return;
   try {
     const records = (await getVisibleTeacherAttendance()).filter((record) => teacherAttendanceStatuses.includes(record.status));
     const present = records.filter((record) => record.status === "Present").length;
@@ -3809,15 +3898,15 @@ async function refreshTeacherAttendanceCounters(role) {
 }
 
 function canViewTeacherWorkload(role = currentUserProfile?.role) {
-  return teacherWorkloadRoles.includes(role);
+  return hasAnyRole(role, teacherWorkloadRoles);
 }
 
 function canManageTeacherWorkload(role = currentUserProfile?.role) {
-  return role === "Principal";
+  return hasRole(role, "Principal");
 }
 
 function canManageSchoolSubjects(role = currentUserProfile?.role) {
-  return role === "Principal";
+  return hasRole(role, "Principal");
 }
 
 async function getVisibleSchoolSubjects() {
@@ -3826,13 +3915,13 @@ async function getVisibleSchoolSubjects() {
 }
 
 async function loadTeacherWorkloadTeachers() {
-  if (currentUserProfile?.role === "Teacher") {
+  if (hasRole(currentUserProfile, "Teacher") && !canManageTeacherWorkload()) {
     academicTeachersCache = [{
       id: auth.currentUser.uid,
       uid: auth.currentUser.uid,
       fullName: currentUserProfile.fullName || auth.currentUser.email,
       email: currentUserProfile.email || auth.currentUser.email,
-      role: currentUserProfile.role,
+      role: formatRoleList(currentUserProfile),
       department: currentUserProfile.department || "",
     }];
     return;
@@ -3843,7 +3932,7 @@ async function loadTeacherWorkloadTeachers() {
 async function getVisibleTeacherWorkloadRecords() {
   if (!canViewTeacherWorkload()) return [];
   const source = collection(db, "teacherWorkloads");
-  if (currentUserProfile?.role !== "Teacher") {
+  if (!hasRole(currentUserProfile, "Teacher") || canManageTeacherWorkload()) {
     const snapshot = await getDocs(source);
     return snapshot.docs.map(normalizeRecord);
   }
@@ -3862,7 +3951,7 @@ async function getVisibleTeacherWorkloadRecords() {
 async function getVisibleAncillaryAssignments() {
   if (!canViewTeacherWorkload()) return [];
   const source = collection(db, "ancillaryAssignments");
-  const assignmentQuery = currentUserProfile?.role === "Teacher"
+  const assignmentQuery = hasRole(currentUserProfile, "Teacher") && !canManageTeacherWorkload()
     ? query(source, where("teacherId", "==", auth.currentUser.uid))
     : source;
   const snapshot = await getDocs(assignmentQuery);
@@ -3870,23 +3959,23 @@ async function getVisibleAncillaryAssignments() {
 }
 
 function canViewGradeSubmissionModule(role = currentUserProfile?.role) {
-  return gradeSubmissionRoles.includes(role);
+  return hasAnyRole(role, gradeSubmissionRoles);
 }
 
 function canMonitorAllGradeSubmissions(role = currentUserProfile?.role) {
-  return ["Principal", "Admin", "SuperAdmin", "Master Teacher", "Head Teacher"].includes(role);
+  return hasAnyRole(role, ["Principal", "Admin", "SuperAdmin", "Master Teacher", "Head Teacher"]);
 }
 
 function canViewLessonPlanModule(role = currentUserProfile?.role) {
-  return lessonPlanRoles.includes(role);
+  return hasAnyRole(role, lessonPlanRoles);
 }
 
 function canSubmitLessonPlanForWorkload(workload) {
-  return Boolean(workload?.teacherId && workload.teacherId === auth.currentUser.uid && currentUserProfile?.role !== "Principal");
+  return Boolean(workload?.teacherId && workload.teacherId === auth.currentUser.uid && !hasRole(currentUserProfile, "Principal"));
 }
 
 function canReviewLessonPlan() {
-  return ["Principal", "Master Teacher", "Head Teacher"].includes(currentUserProfile?.role);
+  return hasAnyRole(currentUserProfile, ["Principal", "Master Teacher", "Head Teacher"]);
 }
 
 async function getVisibleLessonPlans() {
@@ -4278,7 +4367,7 @@ async function refreshLessonPlanCounters(role) {
     lessonPlanRecordsCache = await getVisibleLessonPlans();
     const workloads = teacherWorkloadRecordsCache.filter((workload) =>
       workload.sectionId
-      && (["Principal", "Master Teacher", "Head Teacher"].includes(role) || workload.teacherId === auth.currentUser.uid)
+      && (hasAnyRole(role, ["Principal", "Master Teacher", "Head Teacher"]) || workload.teacherId === auth.currentUser.uid)
     );
     const expected = workloads.length * visibleWeeks.length;
     const submitted = new Set(lessonPlanRecordsCache
@@ -4446,7 +4535,7 @@ async function loadAcademicTeachers() {
   const snapshot = await getDocs(query(collection(db, "users"), where("status", "==", "approved")));
   academicTeachersCache = snapshot.docs
     .map((userDoc) => ({ id: userDoc.id, ...userDoc.data() }))
-    .filter((user) => ["Teacher", "Master Teacher", "Head Teacher", "Principal"].includes(user.role))
+    .filter((user) => hasAnyRole(user, ["Teacher", "Master Teacher", "Head Teacher", "Principal"]))
     .sort((a, b) => (a.fullName || "").localeCompare(b.fullName || ""));
 }
 
@@ -4454,7 +4543,7 @@ async function loadTeacherAttendancePersonnel() {
   const snapshot = await getDocs(query(collection(db, "users"), where("status", "==", "approved")));
   academicTeachersCache = snapshot.docs
     .map((userDoc) => ({ id: userDoc.id, ...userDoc.data() }))
-    .filter((user) => ["Principal", "Master Teacher", "Head Teacher", "Teacher", "Registrar", "Administrative Officer", "Administrative Assistant"].includes(user.role))
+    .filter((user) => hasAnyRole(user, ["Principal", "Master Teacher", "Head Teacher", "Teacher", "Registrar", "Administrative Officer", "Administrative Assistant"]))
     .sort((a, b) => (a.fullName || a.email || "").localeCompare(b.fullName || b.email || ""));
 }
 
@@ -4603,7 +4692,7 @@ async function createAuditLog(action, moduleName, targetRecord, beforeData = nul
     await addDoc(collection(db, "auditLogs"), {
       userId: auth.currentUser.uid,
       userName: currentUserProfile?.fullName || auth.currentUser.email || "User",
-      role: currentUserProfile?.role || "User",
+      role: formatRoleList(currentUserProfile),
       action,
       targetModule: moduleName,
       targetRecord,
@@ -4629,8 +4718,8 @@ async function refreshAcademicCounters(role) {
     const [classes, students, attendance, assessments] = await Promise.all([
       getVisibleClasses(),
       getVisibleStudents(),
-      role === "Teacher" || canViewAllAcademic(role) ? getVisibleStudentAttendance() : Promise.resolve([]),
-      role === "Teacher" || canViewAllAcademic(role) ? getVisibleAssessments() : Promise.resolve([]),
+      hasRole(role, "Teacher") || canViewAllAcademic(role) ? getVisibleStudentAttendance() : Promise.resolve([]),
+      hasRole(role, "Teacher") || canViewAllAcademic(role) ? getVisibleAssessments() : Promise.resolve([]),
     ]);
     const scopedAssessments = assessments.filter((record) =>
       assessmentScopeMatches(record, "pre", visibility) || assessmentScopeMatches(record, "post", visibility)
@@ -4671,7 +4760,7 @@ async function renderClassesModule() {
     <section id="lessonPlanAnalytics" class="attendance-analytics">
       <p class="empty-state">Loading lesson plan analytics...</p>
     </section>
-    ${["Principal", "Master Teacher", "Head Teacher", "Teacher"].includes(currentUserProfile.role) ? `
+    ${hasAnyRole(currentUserProfile, ["Principal", "Master Teacher", "Head Teacher", "Teacher"]) ? `
       <section class="table-card">
         <div class="section-header">
           <div><p class="eyebrow">${canReviewLessonPlan() ? "Reviewer monitoring" : "My pending DLLs"}</p><h2>Missing Lesson Plans</h2></div>
@@ -4860,7 +4949,7 @@ function renderSubjectMappingSetup() {
 function renderTaskVisibilitySetup() {
   const host = document.querySelector("#taskVisibilitySetupHost");
   if (!host) return;
-  if (currentUserProfile?.role !== "Principal") {
+  if (!hasRole(currentUserProfile, "Principal")) {
     host.innerHTML = `<p class="empty-state">Task visibility is managed by the Principal.</p>`;
     return;
   }
@@ -5605,9 +5694,9 @@ async function refreshDashboardAnalytics(role) {
   try {
     const visibility = await getTaskVisibilitySettings();
     const [reports, learners, observations, documents, financialReports, ppas, lessonPlans, workloads, classes, students, assessments, attendanceRecords] = await Promise.all([
-      (role === "Principal" || complianceRoles.includes(role)) ? getVisibleReportAssignments() : Promise.resolve([]),
-      learnerMonitorRoles.includes(role) ? getVisibleLearnerRecords() : Promise.resolve([]),
-      observationRoles.includes(role) ? getVisibleClassroomObservations() : Promise.resolve([]),
+      (hasRole(role, "Principal") || hasAnyRole(role, complianceRoles)) ? getVisibleReportAssignments() : Promise.resolve([]),
+      hasAnyRole(role, learnerMonitorRoles) ? getVisibleLearnerRecords() : Promise.resolve([]),
+      hasAnyRole(role, observationRoles) ? getVisibleClassroomObservations() : Promise.resolve([]),
       canViewDocumentRepository(role) ? getVisibleDocuments() : Promise.resolve([]),
       canViewFinancialReports(role) ? getVisibleFinancialReports() : Promise.resolve([]),
       canViewPpaModule(role) ? getVisiblePpaRecords() : Promise.resolve([]),
@@ -5634,7 +5723,7 @@ async function refreshDashboardAnalytics(role) {
     const lessonPlanExpected = workloads
       .filter((workload) =>
         workload.sectionId
-        && (["Principal", "Master Teacher", "Head Teacher"].includes(role) || workload.teacherId === auth.currentUser.uid)
+        && (hasAnyRole(role, ["Principal", "Master Teacher", "Head Teacher"]) || workload.teacherId === auth.currentUser.uid)
       ).length * activeLessonPlanWeeks(visibility).length;
     const lessonPlanSubmitted = new Set(visibleLessonPlans.map((record) => `${record.workloadId}:${lessonPlanScopeKey(record)}`)).size;
     const scopedAssessments = assessments.filter((record) =>
@@ -6654,7 +6743,7 @@ async function renderTeacherWorkloadModule() {
       getVisibleStudents(),
       getVisibleTeacherWorkloadRecords(),
       getVisibleAncillaryAssignments(),
-      observationRoles.includes(currentUserProfile.role) ? getVisibleClassroomObservations() : Promise.resolve([]),
+      hasAnyRole(currentUserProfile, observationRoles) ? getVisibleClassroomObservations() : Promise.resolve([]),
     ]);
     teacherWorkloadSummariesCache = buildTeacherWorkloadSummaries();
     populateTeacherWorkloadFilters();
@@ -7065,8 +7154,8 @@ async function removeTeacherWorkloadRecord(collectionName, recordId) {
 }
 
 async function renderGradeSubmissionModule() {
-  const canEncode = ["Teacher", "Master Teacher", "Head Teacher"].includes(currentUserProfile.role);
-  const canMonitor = ["Principal", "Master Teacher", "Head Teacher"].includes(currentUserProfile.role);
+  const canEncode = hasAnyRole(currentUserProfile, ["Teacher", "Master Teacher", "Head Teacher"]);
+  const canMonitor = hasAnyRole(currentUserProfile, ["Principal", "Master Teacher", "Head Teacher"]);
   els.dashboardTitle.textContent = "Grade Submission";
   els.dashboardContent.innerHTML = `
     <section class="module-panel compliance-toolbar">
@@ -7371,7 +7460,7 @@ function gradeSubmissionActionButton(row) {
 }
 
 function canEditGradeSubmissionRow(row = {}) {
-  return ["Teacher", "Master Teacher", "Head Teacher"].includes(currentUserProfile?.role)
+  return hasAnyRole(currentUserProfile, ["Teacher", "Master Teacher", "Head Teacher"])
     && (row.teacherUid || row.teacherId) === auth.currentUser.uid
     && ["Not Started", "Draft", "Returned"].includes(row.submissionStatus || "Not Started");
 }
@@ -7381,7 +7470,7 @@ function isGradeSubmissionOverdue(row = {}) {
 }
 
 function getGradeSubmissionEditableWorkloads() {
-  if (!["Teacher", "Master Teacher", "Head Teacher"].includes(currentUserProfile?.role)) return [];
+  if (!hasAnyRole(currentUserProfile, ["Teacher", "Master Teacher", "Head Teacher"])) return [];
   return teacherWorkloadRecordsCache
     .filter((workload) => workload.sectionId && workload.teacherId === auth.currentUser.uid)
     .sort((a, b) => assessmentWorkloadLabel(a).localeCompare(assessmentWorkloadLabel(b)));
@@ -7583,7 +7672,7 @@ async function handleGradeSubmissionFormSubmit(event) {
 
 async function renderLessonPlanModule() {
   els.dashboardTitle.textContent = "Lesson Plans";
-  const canSubmit = ["Teacher", "Master Teacher", "Head Teacher"].includes(currentUserProfile.role);
+  const canSubmit = hasAnyRole(currentUserProfile, ["Teacher", "Master Teacher", "Head Teacher"]);
   els.dashboardContent.innerHTML = `
     <section class="module-panel compliance-toolbar">
       <div>
@@ -8568,7 +8657,7 @@ function getAssessmentEditableWorkloads() {
 }
 
 function buildAssessmentFallbackWorkloads(existingWorkloads = []) {
-  if (currentUserProfile?.role !== "Teacher") return [];
+  if (!hasRole(currentUserProfile, "Teacher")) return [];
   const advisoryClasses = classRecordsCache.filter((section) =>
     section.adviserId === auth.currentUser.uid
     && (section.status || "active") !== "archived"
@@ -12834,7 +12923,7 @@ function applyDocumentFilters() {
       (!category || record.documentCategory === category) &&
       (!uploader || record.uploadedByName === uploader) &&
       (!schoolYear || record.schoolYear === schoolYear) &&
-      (!role || (record.visibilityRoles || []).includes(role)) &&
+      (!role || normalizeRoleList(role).some((item) => (record.visibilityRoles || []).includes(item))) &&
       (!date || createdDateValue === date)
     );
   });
@@ -12999,9 +13088,9 @@ function renderDocumentForm(record = null) {
 
 function getDocumentFormData() {
   const visibilityRoles = [...document.querySelectorAll('input[name="documentVisibilityRoles"]:checked')].map((input) => input.value);
-  if (!visibilityRoles.includes(currentUserProfile.role)) {
-    visibilityRoles.push(currentUserProfile.role);
-  }
+  normalizeRoleList(currentUserProfile).forEach((role) => {
+    if (!visibilityRoles.includes(role)) visibilityRoles.push(role);
+  });
 
   return {
     documentTitle: document.querySelector("#documentTitle").value.trim(),
@@ -13402,7 +13491,7 @@ function renderPpaForm(record = null) {
   const checklist = record?.checklistIndicators || buildDefaultPpaChecklist();
   const selectedTerm = ppaTermLabel(record?.monitoringQuarter || "");
   const selectedMovFolderLink = ppaMovFolderLink(record);
-  const principalChecklistSection = currentUserProfile?.role === "Principal" ? `
+  const principalChecklistSection = hasRole(currentUserProfile, "Principal") ? `
           <section class="ppa-checklist">
             <div class="section-header">
               <div>
@@ -13739,7 +13828,7 @@ function getPpaExportData() {
 }
 
 function isPrincipal() {
-  return currentUserProfile?.role === "Principal";
+  return hasRole(currentUserProfile, "Principal");
 }
 
 async function renderSettingsModule() {
@@ -13841,6 +13930,7 @@ function getFilteredSettingsUsers() {
       user.fullName,
       user.email,
       user.role,
+      ...(Array.isArray(user.roles) ? user.roles : []),
       user.requestedRole,
       user.status,
       user.id,
@@ -13882,6 +13972,7 @@ function renderSettingsUsersTable() {
 function renderSettingsUserRow(user) {
   const isCurrentUser = user.id === auth.currentUser.uid;
   const canChangeRole = user.status === "approved" && !isCurrentUser;
+  const userRoleLabel = normalizeRoleList(user).join(" / ");
   return `
     <tr>
       <td>
@@ -13901,10 +13992,10 @@ function renderSettingsUserRow(user) {
       </td>
       <td>
         ${canChangeRole
-          ? `<select class="settings-role-select" data-user-id="${escapeHtml(user.id)}" data-user-name="${escapeHtml(user.fullName || user.email || user.id)}" data-previous-role="${escapeHtml(user.role || "")}" aria-label="Change role for ${escapeHtml(user.fullName || user.email || user.id)}">
-              ${settingsRoleOptions(user.role || "")}
-            </select>`
-          : escapeHtml(user.role || user.requestedRole || "No role assigned")}
+          ? `<div class="settings-role-select role-checkbox-list" data-user-id="${escapeHtml(user.id)}" data-user-name="${escapeHtml(user.fullName || user.email || user.id)}" data-previous-roles="${escapeHtml(normalizeRoleList(user).join("|"))}" role="group" aria-label="Change roles for ${escapeHtml(user.fullName || user.email || user.id)}">
+              ${settingsRoleOptions(user)}
+            </div>`
+          : escapeHtml(userRoleLabel || user.requestedRole || "No role assigned")}
         ${user.status === "pending" ? `<small class="row-note">Use Pending User Approvals to assign the first role.</small>` : ""}
       </td>
       <td><span class="badge status-${statusClass(user.status)}">${escapeHtml(user.status || "unknown")}</span></td>
@@ -13913,39 +14004,65 @@ function renderSettingsUserRow(user) {
   `;
 }
 
-function settingsRoleOptions(selected = "") {
-  return `<option value="">Select role</option>${roles
-    .map((role) => `<option value="${escapeHtml(role)}" ${role === selected ? "selected" : ""}>${escapeHtml(role)}</option>`)
+function settingsRoleOptions(user = {}) {
+  const selectedRoles = normalizeRoleList(user);
+  return roles
+    .map((role) => `
+      <label class="checkbox-row role-option-row">
+        <input class="settings-role-checkbox" type="checkbox" value="${escapeHtml(role)}" ${selectedRoles.includes(role) ? "checked" : ""} />
+        <span>${escapeHtml(role)}</span>
+      </label>
+    `)
     .join("")}`;
 }
 
-async function handleSettingsRoleChange(select) {
+async function handleSettingsRoleChange(roleList) {
   if (!isPrincipal()) throw new Error("Only Principal can change user roles.");
-  const userId = select.dataset.userId || "";
-  const userName = select.dataset.userName || "this user";
-  const previousRole = select.dataset.previousRole || "";
-  const nextRole = select.value;
-  if (!userId || !nextRole || nextRole === previousRole) return;
-
-  const confirmed = window.confirm(`Change ${userName}'s role from ${previousRole || "No role"} to ${nextRole}?`);
-  if (!confirmed) {
-    select.value = previousRole;
+  const userId = roleList.dataset.userId || "";
+  const userName = roleList.dataset.userName || "this user";
+  const previousRoles = (roleList.dataset.previousRoles || "").split("|").filter(Boolean);
+  const nextRoles = [...roleList.querySelectorAll(".settings-role-checkbox:checked")]
+    .map((input) => input.value)
+    .filter((role) => roles.includes(role));
+  if (!userId || nextRoles.join("|") === previousRoles.join("|")) return;
+  if (!nextRoles.length) {
+    roleList.querySelectorAll(".settings-role-checkbox").forEach((input) => {
+      input.checked = previousRoles.includes(input.value);
+    });
+    showDashboardMessage("Select at least one role for the user.", true);
     return;
   }
 
-  select.disabled = true;
+  const confirmed = window.confirm(`Change ${userName}'s roles from ${previousRoles.join(" / ") || "No role"} to ${nextRoles.join(" / ")}?`);
+  if (!confirmed) {
+    roleList.querySelectorAll(".settings-role-checkbox").forEach((input) => {
+      input.checked = previousRoles.includes(input.value);
+    });
+    return;
+  }
+
+  roleList.querySelectorAll("input").forEach((input) => {
+    input.disabled = true;
+  });
   try {
-    await updateDoc(doc(db, "users", userId), { role: nextRole });
+    await updateDoc(doc(db, "users", userId), { role: nextRoles[0], roles: nextRoles });
     const user = settingsUsersCache.find((item) => item.id === userId);
-    if (user) user.role = nextRole;
-    select.dataset.previousRole = nextRole;
-    showDashboardMessage(`${userName}'s role was changed to ${nextRole}.`);
+    if (user) {
+      user.role = nextRoles[0];
+      user.roles = nextRoles;
+    }
+    roleList.dataset.previousRoles = nextRoles.join("|");
+    showDashboardMessage(`${userName}'s roles were changed to ${nextRoles.join(" / ")}.`);
     await refreshUserCounters(currentUserProfile.role);
   } catch (error) {
-    select.value = previousRole;
+    roleList.querySelectorAll(".settings-role-checkbox").forEach((input) => {
+      input.checked = previousRoles.includes(input.value);
+    });
     showDashboardMessage(`Role change failed: ${error.message}`, true);
   } finally {
-    select.disabled = false;
+    roleList.querySelectorAll("input").forEach((input) => {
+      input.disabled = false;
+    });
   }
 }
 
@@ -14600,8 +14717,9 @@ function bindEvents() {
   });
 
   document.addEventListener("change", (event) => {
-    if (event.target.classList?.contains("settings-role-select")) {
-      handleSettingsRoleChange(event.target);
+    const settingsRoleList = event.target.closest?.(".settings-role-select");
+    if (settingsRoleList && event.target.classList?.contains("settings-role-checkbox")) {
+      handleSettingsRoleChange(settingsRoleList);
     }
     handleDownloadableReportInput(event);
     if (event.target.id === "learnerGradeLevel") {

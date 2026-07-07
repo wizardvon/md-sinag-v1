@@ -649,6 +649,31 @@ button.is-busy:disabled {
   overflow-wrap: anywhere;
 }
 
+.field-label {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--gray-700);
+  font-size: 0.86rem;
+  font-weight: 800;
+}
+
+.role-checkbox-list {
+  display: grid;
+  gap: 8px;
+}
+
+.role-option-row {
+  align-items: center;
+  padding: 8px 10px;
+  border: 1px solid var(--gray-200);
+  border-radius: 8px;
+  background: var(--gray-50);
+}
+
+.settings-users-table .role-checkbox-list {
+  min-width: 210px;
+}
+
 .stat-card-metrics {
   margin-top: auto;
 }
