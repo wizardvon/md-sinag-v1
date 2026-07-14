@@ -127,7 +127,11 @@ service cloud.firestore {
 
     function validPrincipalApproval() {
       return isApprovedPrincipal()
-        && resource.data.status == "pending"
+        && (
+          resource.data.status == "pending"
+          || !resource.data.keys().hasAny(["status"])
+          || resource.data.status == ""
+        )
         && request.resource.data.status == "approved"
         && validRole(request.resource.data.role)
         && validRoleList(request.resource.data.roles)

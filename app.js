@@ -155,6 +155,7 @@ const gradeSubmissionCompliedStatuses = ["Submitted", "Approved"];
 
 let auth;
 let db;
+let authProfileWriteInProgress = false;
 let currentApprovalDocId = null;
 let currentUserProfile = null;
 let complianceRecordsCache = [];
@@ -447,7 +448,62 @@ function switchAuthTab(tabName) {
   els.registerTab.classList.toggle("active", !isLogin);
   els.loginForm.classList.toggle("hidden", !isLogin);
   els.registerForm.classList.toggle("hidden", isLogin);
+  setProfileCompletionMode(false);
   clearAuthMessage();
+}
+
+function setProfileCompletionMode(isCompleting, user = null) {
+  const emailInput = document.querySelector("#registerEmail");
+  const passwordInput = document.querySelector("#registerPassword");
+  const confirmPasswordInput = document.querySelector("#registerConfirmPassword");
+  const registerButton = els.registerForm.querySelector("button[type='submit']");
+  const helperText = els.registerForm.querySelector(".helper-text");
+
+  els.registerForm.dataset.profileCompletion = isCompleting ? "true" : "false";
+  if (emailInput) {
+    emailInput.disabled = isCompleting;
+    if (isCompleting && user?.email) emailInput.value = user.email;
+  }
+  [passwordInput, confirmPasswordInput].forEach((input) => {
+    if (!input) return;
+    input.disabled = isCompleting;
+    input.required = !isCompleting;
+    if (isCompleting) input.value = "";
+  });
+  if (registerButton) {
+    registerButton.textContent = isCompleting ? "Submit profile for approval" : "Register";
+  }
+  if (helperText) {
+    helperText.textContent = isCompleting
+      ? "This authenticated account is missing its Firestore profile. Submit your details so the Principal can approve access."
+      : "New accounts are created with pending status until approved by the Principal.";
+  }
+}
+
+async function createPendingUserProfile(user, { fullName, requestedRole }) {
+  const profile = {
+    uid: user.uid,
+    fullName,
+    email: user.email,
+    requestedRole,
+    role: null,
+    status: "pending",
+    createdAt: serverTimestamp(),
+  };
+
+  await setDoc(doc(db, "users", user.uid), profile);
+  await createRoleNotification("Principal", {
+    senderName: fullName,
+    senderRole: requestedRole,
+    notificationType: "pending_user_approval",
+    title: "New user pending approval",
+    message: `${fullName} requested access as ${requestedRole}.`,
+    relatedModule: "Dashboard",
+    relatedRecordId: user.uid,
+    actionUrl: "#Dashboard",
+  });
+
+  return profile;
 }
 
 async function handleRegister(event) {
@@ -462,39 +518,40 @@ async function handleRegister(event) {
   const password = document.querySelector("#registerPassword").value;
   const confirmPassword = document.querySelector("#registerConfirmPassword").value;
   const requestedRole = els.requestedRole.value;
+  const isCompletingProfile = els.registerForm.dataset.profileCompletion === "true";
 
   try {
+    if (isCompletingProfile) {
+      const user = auth.currentUser;
+      if (!user) {
+        throw new Error("Sign in again before submitting your profile.");
+      }
+      const profile = await createPendingUserProfile(user, { fullName, requestedRole });
+      currentUserProfile = profile;
+      els.registerForm.reset();
+      setProfileCompletionMode(false);
+      stopNotificationListeners();
+      showView("pending");
+      return;
+    }
+
     if (password !== confirmPassword) {
       throw new Error("Passwords do not match. Please re-enter your password.");
     }
 
+    authProfileWriteInProgress = true;
     const credential = await createUserWithEmailAndPassword(auth, email, password);
-
     // Every new account starts pending and has no active role until approved.
-    await setDoc(doc(db, "users", credential.user.uid), {
-      uid: credential.user.uid,
-      fullName,
-      email,
-      requestedRole,
-      role: null,
-      status: "pending",
-      createdAt: serverTimestamp(),
-    });
-    await createRoleNotification("Principal", {
-      senderName: fullName,
-      senderRole: requestedRole,
-      notificationType: "pending_user_approval",
-      title: "New user pending approval",
-      message: `${fullName} requested access as ${requestedRole}.`,
-      relatedModule: "Dashboard",
-      relatedRecordId: credential.user.uid,
-      actionUrl: "#Dashboard",
-    });
+    const profile = await createPendingUserProfile(credential.user, { fullName, requestedRole });
 
+    currentUserProfile = profile;
     els.registerForm.reset();
-    showAuthMessage("Registration submitted. Your account is pending approval.");
+    stopNotificationListeners();
+    showView("pending");
   } catch (error) {
     showAuthMessage(formatFirebaseAuthError(error), true);
+  } finally {
+    authProfileWriteInProgress = false;
   }
 }
 
@@ -551,6 +608,10 @@ async function handleLogout() {
 }
 
 async function handleAuthState(user) {
+  if (authProfileWriteInProgress) {
+    return;
+  }
+
   if (!user) {
     stopNotificationListeners();
     currentUserProfile = null;
@@ -568,8 +629,12 @@ async function handleAuthState(user) {
     return;
   }
   if (!userSnap.exists()) {
-    showAuthMessage("No user profile document found. For the first Principal, create a users document with this Auth UID, role \"Principal\", and status \"approved\".", true);
-    await signOut(auth);
+    stopNotificationListeners();
+    currentUserProfile = null;
+    showView("auth");
+    switchAuthTab("register");
+    setProfileCompletionMode(true, user);
+    showAuthMessage("This account exists in Firebase Authentication but is missing its Firestore user profile. Complete the form to submit it for Principal approval.", true);
     return;
   }
 
@@ -1380,7 +1445,7 @@ async function getCalendarPersonnelOptions() {
   return [...new Map([self, ...visibleUsers].map((user) => [user.uid || user.id, user])).values()];
 }
 
-function canSelectCalendarOwner(role = currentUserProfile?.role) {
+function canSelectCalendarOwner(role = currentUserProfile) {
   return hasAnyRole(role, ["Principal", "Admin", "SuperAdmin", "Master Teacher", "Head Teacher"]);
 }
 
@@ -1721,19 +1786,19 @@ async function loadPendingUsers() {
   const tableHost = document.querySelector("#pendingUsersTable");
   if (!tableHost || !db) return;
 
-  const pendingQuery = query(collection(db, "users"), where("status", "==", "pending"));
-  const snapshot = await getDocs(pendingQuery);
-  const pendingUsers = snapshot.docs.map((pendingDoc) => {
-    const user = pendingDoc.data();
-    return {
+  if (!settingsUsersCache.length) {
+    await loadSettingsUsers({ renderPending: false });
+  }
+  const pendingUsers = settingsUsersCache
+    .filter((user) => normalizeUserStatus(user) === "pending")
+    .map((user) => ({
       ...user,
-      docId: pendingDoc.id,
-      uid: user.uid || "",
+      docId: user.id,
+      uid: user.uid || user.id || "",
       fullName: user.fullName || "",
       email: user.email || "",
       requestedRole: user.requestedRole || "",
-    };
-  });
+    }));
 
   updatePendingApprovalCard(pendingUsers.length);
 
@@ -1845,10 +1910,7 @@ async function handleApproval(event) {
 
     closeApprovalModal();
     showDashboardMessage("User approved successfully.");
-    await loadPendingUsers();
-    if (document.querySelector("#settingsUsersTable")) {
-      await loadSettingsUsers();
-    }
+    await loadSettingsUsers();
   } catch (error) {
     showApprovalMessage(`Approval failed: ${error.message}`, true);
   } finally {
@@ -2765,7 +2827,7 @@ function navigateToModule(moduleName) {
   button?.click();
 }
 
-function canCreateAssignments(role = currentUserProfile?.role) {
+function canCreateAssignments(role = currentUserProfile) {
   return hasAnyRole(role, assignmentCreatorRoles);
 }
 
@@ -3031,7 +3093,7 @@ async function refreshComplianceCounters(role) {
   }
 }
 
-function canCreateLearnerRecord(role = currentUserProfile?.role) {
+function canCreateLearnerRecord(role = currentUserProfile) {
   return hasAnyRole(role, learnerCreatorRoles);
 }
 
@@ -3178,7 +3240,7 @@ async function refreshLearnerCounters(role) {
   }
 }
 
-function canCreateObservation(role = currentUserProfile?.role) {
+function canCreateObservation(role = currentUserProfile) {
   return hasAnyRole(role, observationCreatorRoles);
 }
 
@@ -3320,7 +3382,7 @@ function canManageEnrollmentRecords() {
   return canManageStudents();
 }
 
-function canViewEnrollmentModule(role = currentUserProfile?.role) {
+function canViewEnrollmentModule(role = currentUserProfile) {
   return hasAnyRole(role, enrollmentMonitorRoles);
 }
 
@@ -3429,7 +3491,7 @@ async function refreshEnrollmentCounters(role) {
   }
 }
 
-function canViewDocumentRepository(role = currentUserProfile?.role) {
+function canViewDocumentRepository(role = currentUserProfile) {
   return hasAnyRole(role, documentRoles);
 }
 
@@ -3525,11 +3587,11 @@ async function refreshDocumentCounters(role) {
   }
 }
 
-function canViewInventoryFacilities(role = currentUserProfile?.role) {
+function canViewInventoryFacilities(role = currentUserProfile) {
   return hasAnyRole(role, inventoryFacilityRoles);
 }
 
-function canManageInventoryFacilities(role = currentUserProfile?.role) {
+function canManageInventoryFacilities(role = currentUserProfile) {
   return hasAnyRole(role, inventoryFacilityManagerRoles);
 }
 
@@ -3562,15 +3624,15 @@ async function refreshInventoryFacilityCounters(role) {
   }
 }
 
-function canViewFinancialReports(role = currentUserProfile?.role) {
+function canViewFinancialReports(role = currentUserProfile) {
   return hasAnyRole(role, financialReportRoles);
 }
 
-function canManageFinancialReports(role = currentUserProfile?.role) {
+function canManageFinancialReports(role = currentUserProfile) {
   return hasAnyRole(role, financialReportManagerRoles);
 }
 
-function canReviewFinancialReports(role = currentUserProfile?.role) {
+function canReviewFinancialReports(role = currentUserProfile) {
   return hasAnyRole(role, financialReportReviewerRoles);
 }
 
@@ -3662,11 +3724,11 @@ async function refreshFinancialReportCounters(role) {
   }
 }
 
-function canViewPpaModule(role = currentUserProfile?.role) {
+function canViewPpaModule(role = currentUserProfile) {
   return hasAnyRole(role, ppaRoles);
 }
 
-function canCreatePpaRecord(role = currentUserProfile?.role) {
+function canCreatePpaRecord(role = currentUserProfile) {
   return hasAnyRole(role, ppaRoles);
 }
 
@@ -3768,19 +3830,19 @@ async function refreshUserCounters(role) {
   }
 }
 
-function canManageClasses(role = currentUserProfile?.role) {
+function canManageClasses(role = currentUserProfile) {
   return hasAnyRole(role, academicManagerRoles);
 }
 
-function canManageStudents(role = currentUserProfile?.role) {
+function canManageStudents(role = currentUserProfile) {
   return hasAnyRole(role, ["Registrar", "Principal"]);
 }
 
-function canViewAcademicModule(role = currentUserProfile?.role) {
+function canViewAcademicModule(role = currentUserProfile) {
   return hasAnyRole(role, academicMonitorRoles);
 }
 
-function canViewAllAcademic(role = currentUserProfile?.role) {
+function canViewAllAcademic(role = currentUserProfile) {
   return hasAnyRole(role, academicViewerRoles);
 }
 
@@ -3879,7 +3941,7 @@ async function getVisibleTeacherAttendance() {
   return snapshot.docs.map(normalizeRecord);
 }
 
-function canManageTeacherAttendance(role = currentUserProfile?.role) {
+function canManageTeacherAttendance(role = currentUserProfile) {
   return hasAnyRole(role, ["Principal", "Administrative Officer", "Administrative Assistant"]);
 }
 
@@ -3897,15 +3959,15 @@ async function refreshTeacherAttendanceCounters(role) {
   }
 }
 
-function canViewTeacherWorkload(role = currentUserProfile?.role) {
+function canViewTeacherWorkload(role = currentUserProfile) {
   return hasAnyRole(role, teacherWorkloadRoles);
 }
 
-function canManageTeacherWorkload(role = currentUserProfile?.role) {
+function canManageTeacherWorkload(role = currentUserProfile) {
   return hasRole(role, "Principal");
 }
 
-function canManageSchoolSubjects(role = currentUserProfile?.role) {
+function canManageSchoolSubjects(role = currentUserProfile) {
   return hasRole(role, "Principal");
 }
 
@@ -3958,15 +4020,15 @@ async function getVisibleAncillaryAssignments() {
   return snapshot.docs.map(normalizeRecord);
 }
 
-function canViewGradeSubmissionModule(role = currentUserProfile?.role) {
+function canViewGradeSubmissionModule(role = currentUserProfile) {
   return hasAnyRole(role, gradeSubmissionRoles);
 }
 
-function canMonitorAllGradeSubmissions(role = currentUserProfile?.role) {
+function canMonitorAllGradeSubmissions(role = currentUserProfile) {
   return hasAnyRole(role, ["Principal", "Admin", "SuperAdmin", "Master Teacher", "Head Teacher"]);
 }
 
-function canViewLessonPlanModule(role = currentUserProfile?.role) {
+function canViewLessonPlanModule(role = currentUserProfile) {
   return hasAnyRole(role, lessonPlanRoles);
 }
 
@@ -13906,21 +13968,44 @@ async function renderSettingsModule() {
     </section>
   `;
 
-  await Promise.all([loadPendingUsers(), loadSettingsUsers()]);
+  await loadSettingsUsers();
 }
 
-async function loadSettingsUsers() {
+function normalizeUserStatus(user = {}) {
+  const status = String(user.status || "").trim().toLowerCase();
+  if (status === "approved" || status === "pending") return status;
+  return normalizeRoleList(user).length ? "approved" : "pending";
+}
+
+function normalizeSettingsUser(userSnapshot) {
+  const data = userSnapshot.data();
+  return {
+    id: userSnapshot.id,
+    ...data,
+    uid: data.uid || userSnapshot.id,
+    status: normalizeUserStatus(data),
+  };
+}
+
+async function loadSettingsUsers({ renderPending = true } = {}) {
   const tableHost = document.querySelector("#settingsUsersTable");
   if (!tableHost || !db) return;
 
-  const snapshot = await getDocs(collection(db, "users"));
-  settingsUsersCache = snapshot.docs
-    .map((userSnapshot) => ({
-      id: userSnapshot.id,
-      ...userSnapshot.data(),
-    }))
-    .sort((a, b) => (a.fullName || a.email || "").localeCompare(b.fullName || b.email || ""));
-  renderSettingsUsersTable();
+  try {
+    const snapshot = await getDocs(collection(db, "users"));
+    settingsUsersCache = snapshot.docs
+      .map(normalizeSettingsUser)
+      .sort((a, b) => (a.fullName || a.email || "").localeCompare(b.fullName || b.email || ""));
+    renderSettingsUsersTable();
+    if (renderPending) await loadPendingUsers();
+  } catch (error) {
+    console.warn("Unable to load users:", error);
+    tableHost.innerHTML = `<p class="empty-state error">Unable to load user profiles: ${escapeHtml(error.message)}</p>`;
+    const pendingHost = document.querySelector("#pendingUsersTable");
+    if (pendingHost) {
+      pendingHost.innerHTML = `<p class="empty-state error">Unable to load pending approvals: ${escapeHtml(error.message)}</p>`;
+    }
+  }
 }
 
 function getFilteredSettingsUsers() {
@@ -14013,7 +14098,7 @@ function settingsRoleOptions(user = {}) {
         <span>${escapeHtml(role)}</span>
       </label>
     `)
-    .join("")}`;
+    .join("");
 }
 
 async function handleSettingsRoleChange(roleList) {
@@ -14345,8 +14430,9 @@ function bindEvents() {
     els.sidebar.classList.remove("open");
 
     if (button.dataset.module === "Dashboard") {
-      renderDashboardHome(dashboardByRole[currentUserProfile.role], currentUserProfile.role);
-      els.dashboardTitle.textContent = dashboardIdToTitle(dashboardByRole[currentUserProfile.role]);
+      const dashboardId = dashboardByRole[primaryRole(currentUserProfile)] || "teacherDashboard";
+      renderDashboardHome(dashboardId, currentUserProfile);
+      els.dashboardTitle.textContent = dashboardIdToTitle(dashboardId);
     } else if (button.dataset.module === "School Setup") {
       renderSchoolSetupModule();
     } else if (button.dataset.module === "Report Assignment") {
