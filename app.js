@@ -96,7 +96,7 @@ import {
   dashboardByRole,
   modulesByRole,
   dashboardCards,
-} from "./constants.js?v=20260524-2";
+} from "./constants.js?v=20260811-dll-requests";
 
 const els = {
   authView: document.querySelector("#authView"),
@@ -203,6 +203,9 @@ let filteredGradeSubmissionRows = [];
 let filteredGradeSubmissionGroups = [];
 let editingGradeSubmissionId = null;
 let editingGradeSubmissionRowKey = "";
+let dllRequestRecordsCache = [];
+let filteredDllRequests = [];
+let selectedDllRequestId = "";
 let lessonPlanRecordsCache = [];
 let filteredLessonPlans = [];
 let taskVisibilitySettingsCache = null;
@@ -785,15 +788,6 @@ function isGoogleDriveFolderUrl(value = "") {
   }
 }
 
-const lessonPlanWeekOptions = termOptions.flatMap((term) =>
-  Array.from({ length: 10 }, (_, index) => ({
-    key: `${term}:Week ${index + 1}`,
-    label: `${term} - Week ${index + 1}`,
-    term,
-    weekNumber: index + 1,
-  }))
-);
-
 const assessmentScopeOptions = termOptions.flatMap((term) =>
   assessmentScoreTypes.map((scoreType) => ({
     key: `${term}:${scoreType.value}`,
@@ -1130,12 +1124,16 @@ async function getUserCalendarItems(user) {
   if (!user || !auth) return [];
 
   const canUseReports = hasRole(user, "Principal") || hasAnyRole(user, complianceRoles);
-  const [reports, observations, learners, approvalItems, personalItems] = await Promise.all([
+  const [reports, observations, learners, approvalItems, personalItems, dllRequests, dllSubmissions, dllWorkloads, dllClasses] = await Promise.all([
     canUseReports ? getVisibleReportAssignments() : Promise.resolve([]),
     hasAnyRole(user, observationRoles) ? getVisibleClassroomObservations() : Promise.resolve([]),
     hasAnyRole(user, learnerMonitorRoles) ? getVisibleLearnerRecords() : Promise.resolve([]),
     hasRole(user, "Principal") ? getPendingApprovalCalendarItems() : Promise.resolve([]),
     getCalendarEventsForUser(auth.currentUser.uid).catch(() => []),
+    canViewLessonPlanModule(user) ? getVisibleDllRequests() : Promise.resolve([]),
+    canViewLessonPlanModule(user) ? getVisibleLessonPlans() : Promise.resolve([]),
+    canViewLessonPlanModule(user) ? getVisibleTeacherWorkloadRecords() : Promise.resolve([]),
+    canViewLessonPlanModule(user) ? getVisibleClasses() : Promise.resolve([]),
   ]);
 
   const reportItems = reports
@@ -1208,8 +1206,9 @@ async function getUserCalendarItems(user) {
     }));
 
   const scheduleItems = personalItems.map(calendarEventToItem);
+  const dllItems = buildDllCalendarItems(dllRequests, hydrateWorkloadSchoolYears(dllWorkloads, dllClasses), dllSubmissions, user);
 
-  return [...scheduleItems, ...reportItems, ...observationItems, ...learnerItems, ...approvalItems, ...notificationItems]
+  return [...scheduleItems, ...reportItems, ...observationItems, ...learnerItems, ...approvalItems, ...dllItems, ...notificationItems]
     .filter((item) => item.date)
     .sort((a, b) => a.date.localeCompare(b.date));
 }
@@ -2338,6 +2337,59 @@ function getDownloadableReportDefinitions() {
         record.remarks,
         record.isLegacy ? "Yes" : "No",
       ],
+    });
+  }
+
+  if (canViewLessonPlanModule(role)) {
+    definitions.push({
+      id: "dllRequests",
+      label: "DLL Requests and Compliance",
+      description: "Central DLL requests with request-based workload compliance totals.",
+      dateField: "dueDate",
+      statusField: "status",
+      categoryField: "term",
+      loader: async () => {
+        await loadTeacherWorkloadTeachers();
+        [classRecordsCache, teacherWorkloadRecordsCache, lessonPlanRecordsCache, dllRequestRecordsCache] = await Promise.all([
+          getVisibleClasses(),
+          getVisibleTeacherWorkloadRecords(),
+          getVisibleLessonPlans(),
+          getVisibleDllRequests(),
+        ]);
+        return dllRequestRecordsCache;
+      },
+      headers: ["Title", "School Year", "Term", "Week", "Week Start", "Week End", "Due Date", "Status", "Expected", "Submitted", "Pending", "Unchecked", "Reviewed", "Returned", "Created By", "Instructions"],
+      row: (requestRecord) => {
+        const state = buildActiveDllDashboardState(
+          requestRecord.status === "Active" ? [requestRecord] : [],
+          teacherWorkloadRecordsCache,
+          lessonPlanRecordsCache,
+          role
+        );
+        const historicalRows = buildDllExpectedRows(requestRecord, teacherWorkloadRecordsCache, lessonPlanRecordsCache, canReviewLessonPlan(role) ? "" : auth.currentUser?.uid || "");
+        const submitted = historicalRows.filter((row) => row.record).length;
+        const unchecked = historicalRows.filter((row) => row.status === "Submitted").length;
+        const reviewed = historicalRows.filter((row) => ["Noted", "Confirmed"].includes(row.status)).length;
+        const returned = historicalRows.filter((row) => row.status === "Returned for Revision").length;
+        return [
+          requestRecord.title,
+          requestRecord.schoolYear,
+          requestRecord.term,
+          requestRecord.weekLabel,
+          requestRecord.weekStart,
+          requestRecord.weekEnd,
+          requestRecord.dueDate,
+          requestRecord.status,
+          historicalRows.length,
+          submitted,
+          requestRecord.status === "Active" ? state.pending : 0,
+          unchecked,
+          reviewed,
+          returned,
+          requestRecord.createdByName,
+          requestRecord.instructions,
+        ];
+      },
     });
   }
 
@@ -3977,13 +4029,13 @@ async function getVisibleSchoolSubjects() {
 }
 
 async function loadTeacherWorkloadTeachers() {
-  if (hasRole(currentUserProfile, "Teacher") && !canManageTeacherWorkload()) {
+  if (hasRole(currentUserProfile, "Teacher") && !canReviewLessonPlan() && !canManageTeacherWorkload()) {
     academicTeachersCache = [{
       id: auth.currentUser.uid,
       uid: auth.currentUser.uid,
       fullName: currentUserProfile.fullName || auth.currentUser.email,
       email: currentUserProfile.email || auth.currentUser.email,
-      role: formatRoleList(currentUserProfile),
+      role: primaryRole(currentUserProfile),
       department: currentUserProfile.department || "",
     }];
     return;
@@ -3994,7 +4046,7 @@ async function loadTeacherWorkloadTeachers() {
 async function getVisibleTeacherWorkloadRecords() {
   if (!canViewTeacherWorkload()) return [];
   const source = collection(db, "teacherWorkloads");
-  if (!hasRole(currentUserProfile, "Teacher") || canManageTeacherWorkload()) {
+  if (!hasRole(currentUserProfile, "Teacher") || canReviewLessonPlan() || canManageTeacherWorkload()) {
     const snapshot = await getDocs(source);
     return snapshot.docs.map(normalizeRecord);
   }
@@ -4033,11 +4085,39 @@ function canViewLessonPlanModule(role = currentUserProfile) {
 }
 
 function canSubmitLessonPlanForWorkload(workload) {
-  return Boolean(workload?.teacherId && workload.teacherId === auth.currentUser.uid && !hasRole(currentUserProfile, "Principal"));
+  return Boolean(
+    workload?.teacherId
+    && workload.teacherId === auth.currentUser.uid
+    && hasAnyRole(currentUserProfile, ["Teacher", "Master Teacher", "Head Teacher"])
+  );
 }
 
-function canReviewLessonPlan() {
-  return hasAnyRole(currentUserProfile, ["Principal", "Master Teacher", "Head Teacher"]);
+function lessonPlanSubmitterRole(role = currentUserProfile) {
+  return normalizeRoleList(role).find((item) => ["Master Teacher", "Head Teacher", "Teacher"].includes(item)) || "";
+}
+
+function canReviewLessonPlan(role = currentUserProfile) {
+  return hasAnyRole(role, ["Principal", "Master Teacher", "Head Teacher"]);
+}
+
+function canManageDllRequests(role = currentUserProfile) {
+  return hasAnyRole(role, ["Principal", "Master Teacher", "Head Teacher"]);
+}
+
+function canManageDllRequest(requestRecord, role = currentUserProfile) {
+  return Boolean(
+    requestRecord
+    && (
+      hasRole(role, "Principal")
+      || requestRecord.createdByUid === auth.currentUser?.uid
+    )
+  );
+}
+
+async function getVisibleDllRequests() {
+  if (!canViewLessonPlanModule()) return [];
+  const snapshot = await getDocs(collection(db, "dllRequests"));
+  return snapshot.docs.map(normalizeRecord);
 }
 
 async function getVisibleLessonPlans() {
@@ -4050,11 +4130,143 @@ async function getVisibleLessonPlans() {
   return mine.docs.map(normalizeRecord);
 }
 
-function findLessonPlanRecord(workloadId, term, weekNumber) {
-  return lessonPlanRecordsCache.find((record) =>
-    record.workloadId === workloadId
-    && record.term === term
-    && Number(record.weekNumber || 0) === Number(weekNumber || 0)
+function workloadSchoolYear(workload = {}) {
+  return workload.schoolYear || getSelectedClass(workload.sectionId)?.schoolYear || "";
+}
+
+function hydrateWorkloadSchoolYears(workloads = [], classes = classRecordsCache) {
+  const classYearById = new Map(classes.map((record) => [record.id, record.schoolYear || ""]));
+  return workloads.map((workload) => ({
+    ...workload,
+    schoolYear: workload.schoolYear || classYearById.get(workload.sectionId) || "",
+  }));
+}
+
+function lessonPlanSubmissionKey(requestId = "", workloadId = "", teacherId = "") {
+  return `${requestId}:${workloadId}:${teacherId}`;
+}
+
+function lessonPlanDocumentId(requestId = "", workloadId = "", teacherId = "") {
+  return [requestId, workloadId, teacherId].join("__");
+}
+
+function lessonPlanRecordUpdatedAt(record = {}) {
+  const value = record.updatedAt || record.submittedAt || record.createdAt;
+  if (value?.toMillis) return value.toMillis();
+  const parsed = new Date(value || 0).getTime();
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function getUniqueRequestLessonPlans(records = lessonPlanRecordsCache) {
+  const unique = new Map();
+  records.filter((record) => record.requestId).forEach((record) => {
+    const key = lessonPlanSubmissionKey(record.requestId, record.workloadId, record.teacherId);
+    const current = unique.get(key);
+    if (!current || lessonPlanRecordUpdatedAt(record) >= lessonPlanRecordUpdatedAt(current)) unique.set(key, record);
+  });
+  return [...unique.values()];
+}
+
+function getLegacyLessonPlans(records = lessonPlanRecordsCache) {
+  return records.filter((record) => !record.requestId);
+}
+
+function lessonPlanWorkloadsForRequest(requestRecord, workloads = teacherWorkloadRecordsCache, teacherId = "") {
+  if (!requestRecord?.schoolYear) return [];
+  return workloads.filter((workload) =>
+    workload.sectionId
+    && workloadSchoolYear(workload) === requestRecord.schoolYear
+    && (!teacherId || workload.teacherId === teacherId)
+  );
+}
+
+function findLessonPlanRecord(requestId, workloadId, teacherId = auth.currentUser?.uid || "") {
+  return getUniqueRequestLessonPlans().find((record) =>
+    record.requestId === requestId
+    && record.workloadId === workloadId
+    && record.teacherId === teacherId
+  );
+}
+
+function buildDllExpectedRows(requestRecord, workloads = teacherWorkloadRecordsCache, submissions = lessonPlanRecordsCache, teacherId = "") {
+  const submissionMap = new Map(getUniqueRequestLessonPlans(submissions).map((record) => [
+    lessonPlanSubmissionKey(record.requestId, record.workloadId, record.teacherId),
+    record,
+  ]));
+  return lessonPlanWorkloadsForRequest(requestRecord, workloads, teacherId).map((workload) => {
+    const record = submissionMap.get(lessonPlanSubmissionKey(requestRecord.id, workload.id, workload.teacherId)) || null;
+    return {
+      request: requestRecord,
+      workload,
+      record,
+      status: record?.status || "Pending",
+    };
+  });
+}
+
+function buildActiveDllDashboardState(requests = [], workloads = [], submissions = [], role = currentUserProfile) {
+  const reviewer = canReviewLessonPlan(role);
+  const teacherId = reviewer ? "" : auth.currentUser?.uid || "";
+  const activeRequests = requests.filter((requestRecord) => requestRecord.status === "Active");
+  const rows = activeRequests.flatMap((requestRecord) => buildDllExpectedRows(requestRecord, workloads, submissions, teacherId));
+  const completedStatuses = ["Submitted", "Noted", "Confirmed"];
+  const completed = rows.filter((row) => completedStatuses.includes(row.status)).length;
+  return {
+    activeRequests,
+    rows,
+    expected: rows.length,
+    submitted: completed,
+    pending: Math.max(rows.length - completed, 0),
+    unchecked: rows.filter((row) => row.status === "Submitted").length,
+    reviewed: rows.filter((row) => ["Noted", "Confirmed"].includes(row.status)).length,
+    returned: rows.filter((row) => row.status === "Returned for Revision").length,
+  };
+}
+
+function buildDllCalendarItems(requests = [], workloads = [], submissions = [], role = currentUserProfile) {
+  const reviewer = canReviewLessonPlan(role);
+  const activeRequests = requests.filter((requestRecord) => requestRecord.status === "Active" && requestRecord.dueDate);
+  if (reviewer) {
+    return activeRequests.flatMap((requestRecord) => {
+      const rows = buildDllExpectedRows(requestRecord, workloads, submissions);
+      const actionRows = rows.filter((row) => ["Pending", "Submitted", "Returned for Revision"].includes(row.status));
+      if (!actionRows.length) return [];
+      return [{
+        id: `dll-request-${requestRecord.id}`,
+        recordId: requestRecord.id,
+        type: "DLL Request",
+        typeClass: "report",
+        title: requestRecord.title || "DLL submission request",
+        date: requestRecord.dueDate,
+        status: "Pending",
+        assignedBy: requestRecord.createdByName || "School leadership",
+        submitTo: requestRecord.createdByName || "School leadership",
+        assignedTo: "Teaching personnel",
+        description: `${actionRows.length} submission${actionRows.length === 1 ? "" : "s"} need submission, checking, or revision.`,
+        module: "Lesson Plans",
+      }];
+    });
+  }
+
+  return activeRequests.flatMap((requestRecord) =>
+    buildDllExpectedRows(requestRecord, workloads, submissions, auth.currentUser?.uid || "")
+      .filter((row) => ["Pending", "Returned for Revision"].includes(row.status))
+      .map((row) => ({
+        id: `dll-${requestRecord.id}-${row.workload.id}`,
+        recordId: row.record?.id || requestRecord.id,
+        type: "DLL Request",
+        typeClass: "report",
+        title: `${requestRecord.title || "DLL submission"} - ${subjectGradeSectionClassLabel(row.workload)}`,
+        date: requestRecord.dueDate,
+        status: row.status,
+        assignedBy: requestRecord.createdByName || "School leadership",
+        submitTo: requestRecord.createdByName || "School leadership",
+        assignedTo: row.workload.teacherName || currentUserProfile?.fullName || "Teacher",
+        description: row.status === "Returned for Revision"
+          ? "Correct and resubmit the returned DLL."
+          : `${requestRecord.weekLabel || "Requested week"} DLL submission is pending.`,
+        module: "Lesson Plans",
+      }))
   );
 }
 
@@ -4062,7 +4274,6 @@ function defaultTaskVisibilitySettings() {
   return {
     gradeTerms: [...termOptions],
     assessmentScopes: assessmentScopeOptions.map((item) => item.key),
-    lessonPlanWeeks: lessonPlanWeekOptions.map((item) => item.key),
   };
 }
 
@@ -4106,15 +4317,6 @@ function activeGradeTerms(settings = taskVisibilitySettingsCache || defaultTaskV
 
 function activeAssessmentScopes(settings = taskVisibilitySettingsCache || defaultTaskVisibilitySettings()) {
   return settings.assessmentScopes?.length ? settings.assessmentScopes : assessmentScopeOptions.map((item) => item.key);
-}
-
-function activeLessonPlanWeeks(settings = taskVisibilitySettingsCache || defaultTaskVisibilitySettings()) {
-  return settings.lessonPlanWeeks?.length ? settings.lessonPlanWeeks : lessonPlanWeekOptions.map((item) => item.key);
-}
-
-function lessonPlanScopeKey(record) {
-  if (record.term && record.weekNumber) return `${record.term}:Week ${record.weekNumber}`;
-  return "";
 }
 
 function assessmentScopeMatches(record, scoreType, settings = taskVisibilitySettingsCache || defaultTaskVisibilitySettings()) {
@@ -4421,22 +4623,15 @@ async function refreshGradeSubmissionCounters(role) {
 async function refreshLessonPlanCounters(role) {
   if (!db || !auth || !canViewLessonPlanModule(role)) return;
   try {
-    const visibility = await getTaskVisibilitySettings();
-    const visibleWeeks = activeLessonPlanWeeks(visibility);
     await loadTeacherWorkloadTeachers();
     classRecordsCache = await getVisibleClasses();
     teacherWorkloadRecordsCache = await getVisibleTeacherWorkloadRecords();
-    lessonPlanRecordsCache = await getVisibleLessonPlans();
-    const workloads = teacherWorkloadRecordsCache.filter((workload) =>
-      workload.sectionId
-      && (hasAnyRole(role, ["Principal", "Master Teacher", "Head Teacher"]) || workload.teacherId === auth.currentUser.uid)
-    );
-    const expected = workloads.length * visibleWeeks.length;
-    const submitted = new Set(lessonPlanRecordsCache
-      .filter((record) => visibleWeeks.includes(lessonPlanScopeKey(record)))
-      .map((record) => `${record.workloadId}:${lessonPlanScopeKey(record)}`)).size;
-    const pending = Math.max(expected - submitted, 0);
-    updateCardValue("Lesson Plans", `${submitted}/${pending}`);
+    [dllRequestRecordsCache, lessonPlanRecordsCache] = await Promise.all([
+      getVisibleDllRequests(),
+      getVisibleLessonPlans(),
+    ]);
+    const state = buildActiveDllDashboardState(dllRequestRecordsCache, teacherWorkloadRecordsCache, lessonPlanRecordsCache, role);
+    updateCardValue("Lesson Plans", `${state.submitted}/${state.pending}`);
   } catch (error) {
     console.warn("Unable to load lesson plan counters:", error);
   }
@@ -4819,25 +5014,6 @@ async function renderClassesModule() {
         ${canManageClasses() ? `<button id="newClassButton" class="primary-button" type="button">Create Section</button>` : ""}
       </div>
     </section>
-    <section id="lessonPlanAnalytics" class="attendance-analytics">
-      <p class="empty-state">Loading lesson plan analytics...</p>
-    </section>
-    ${hasAnyRole(currentUserProfile, ["Principal", "Master Teacher", "Head Teacher", "Teacher"]) ? `
-      <section class="table-card">
-        <div class="section-header">
-          <div><p class="eyebrow">${canReviewLessonPlan() ? "Reviewer monitoring" : "My pending DLLs"}</p><h2>Missing Lesson Plans</h2></div>
-        </div>
-        <div id="missingLessonPlansHost" class="table-wrap"><p class="empty-state">Loading missing lesson plans...</p></div>
-      </section>
-    ` : ""}
-    ${canReviewLessonPlan() ? `
-      <section class="table-card">
-        <div class="section-header">
-          <div><p class="eyebrow">Reviewer monitoring</p><h2>Submitted, Not Yet Checked</h2></div>
-        </div>
-        <div id="uncheckedLessonPlansHost" class="table-wrap"><p class="empty-state">Loading unchecked submissions...</p></div>
-      </section>
-    ` : ""}
     <section class="table-card">
       <div class="section-header"><h2>Sections</h2></div>
       <div class="filter-grid">
@@ -5036,12 +5212,7 @@ function renderTaskVisibilitySetup() {
           ${assessmentScopeOptions.map((item) => checkbox("visibleAssessmentScopes", item.key, item.label, activeAssessmentScopes(settings).includes(item.key))).join("")}
         </div>
       </fieldset>
-      <fieldset class="checkbox-group">
-        <legend>Lesson Plan Weeks</legend>
-        <div class="assignee-list task-week-list">
-          ${lessonPlanWeekOptions.map((item) => checkbox("visibleLessonPlanWeeks", item.key, item.label, activeLessonPlanWeeks(settings).includes(item.key))).join("")}
-        </div>
-      </fieldset>
+      <p class="helper-text">DLL requirements are managed through centralized requests in the Lesson Plans module.</p>
       <div id="taskVisibilityMessage" class="message hidden" role="status"></div>
       <div class="modal-actions">
         <button class="primary-button" type="submit">Save Visibility</button>
@@ -5057,16 +5228,14 @@ async function handleTaskVisibilitySubmit(event) {
     const settings = {
       gradeTerms: selectedTaskCheckboxValues("visibleGradeTerms"),
       assessmentScopes: selectedTaskCheckboxValues("visibleAssessmentScopes"),
-      lessonPlanWeeks: selectedTaskCheckboxValues("visibleLessonPlanWeeks"),
     };
-    if (!settings.gradeTerms.length || !settings.assessmentScopes.length || !settings.lessonPlanWeeks.length) {
+    if (!settings.gradeTerms.length || !settings.assessmentScopes.length) {
       throw new Error("Select at least one item in every task visibility group.");
     }
     await saveTaskVisibilitySettings(settings);
     message.textContent = "Task visibility saved.";
     message.classList.remove("hidden", "error");
     await refreshGradeSubmissionCounters(currentUserProfile.role);
-    await refreshLessonPlanCounters(currentUserProfile.role);
     await refreshAcademicCounters(currentUserProfile.role);
     await refreshDashboardAnalytics(currentUserProfile.role);
   } catch (error) {
@@ -5755,7 +5924,7 @@ async function refreshDashboardAnalytics(role) {
 
   try {
     const visibility = await getTaskVisibilitySettings();
-    const [reports, learners, observations, documents, financialReports, ppas, lessonPlans, workloads, classes, students, assessments, attendanceRecords] = await Promise.all([
+    const [reports, learners, observations, documents, financialReports, ppas, lessonPlans, dllRequests, workloads, classes, students, assessments, attendanceRecords] = await Promise.all([
       (hasRole(role, "Principal") || hasAnyRole(role, complianceRoles)) ? getVisibleReportAssignments() : Promise.resolve([]),
       hasAnyRole(role, learnerMonitorRoles) ? getVisibleLearnerRecords() : Promise.resolve([]),
       hasAnyRole(role, observationRoles) ? getVisibleClassroomObservations() : Promise.resolve([]),
@@ -5763,6 +5932,7 @@ async function refreshDashboardAnalytics(role) {
       canViewFinancialReports(role) ? getVisibleFinancialReports() : Promise.resolve([]),
       canViewPpaModule(role) ? getVisiblePpaRecords() : Promise.resolve([]),
       canViewLessonPlanModule(role) ? getVisibleLessonPlans() : Promise.resolve([]),
+      canViewLessonPlanModule(role) ? getVisibleDllRequests() : Promise.resolve([]),
       canViewTeacherWorkload(role) ? getVisibleTeacherWorkloadRecords() : Promise.resolve([]),
       canViewAcademicModule(role) ? getVisibleClasses() : Promise.resolve([]),
       canViewAcademicModule(role) ? getVisibleStudents() : Promise.resolve([]),
@@ -5781,13 +5951,7 @@ async function refreshDashboardAnalytics(role) {
       classProfilesCache = [];
     }
 
-    const visibleLessonPlans = lessonPlans.filter((record) => activeLessonPlanWeeks(visibility).includes(lessonPlanScopeKey(record)));
-    const lessonPlanExpected = workloads
-      .filter((workload) =>
-        workload.sectionId
-        && (hasAnyRole(role, ["Principal", "Master Teacher", "Head Teacher"]) || workload.teacherId === auth.currentUser.uid)
-      ).length * activeLessonPlanWeeks(visibility).length;
-    const lessonPlanSubmitted = new Set(visibleLessonPlans.map((record) => `${record.workloadId}:${lessonPlanScopeKey(record)}`)).size;
+    const lessonPlanState = buildActiveDllDashboardState(dllRequests, hydrateWorkloadSchoolYears(workloads, classes), lessonPlans, role);
     const scopedAssessments = assessments.filter((record) =>
       assessmentScopeMatches(record, "pre", visibility) || assessmentScopeMatches(record, "post", visibility)
     );
@@ -5829,8 +5993,9 @@ async function refreshDashboardAnalytics(role) {
       reportGroups.length ? renderSummaryChart("Compliance Status", groupCountRows(reportGroups, "status")) : "",
       upcomingDeadlines.length ? renderSummaryChart("Upcoming Deadlines", upcomingDeadlines.map((record) => [record.title || record.reportType || "Report", 1])) : "",
       canViewLessonPlanModule(role) ? renderSummaryChart("Lesson Plan Completion", [
-        ["Submitted", lessonPlanSubmitted],
-        ["Pending", Math.max(lessonPlanExpected - lessonPlanSubmitted, 0)],
+        ["Submitted", lessonPlanState.submitted],
+        ["Pending", lessonPlanState.pending],
+        ["Returned", lessonPlanState.returned],
       ]) : "",
       canViewAcademicModule(role) ? renderSummaryChart("Assessment Completion", [
         ["Diagnostic Submitted", diagnosticCompletion.submitted],
@@ -7735,34 +7900,51 @@ async function handleGradeSubmissionFormSubmit(event) {
 async function renderLessonPlanModule() {
   els.dashboardTitle.textContent = "Lesson Plans";
   const canSubmit = hasAnyRole(currentUserProfile, ["Teacher", "Master Teacher", "Head Teacher"]);
+  const canManageRequests = canManageDllRequests();
   els.dashboardContent.innerHTML = `
     <section class="module-panel compliance-toolbar">
       <div>
-        <p class="eyebrow">DLL monitoring</p>
-        <h2>Lesson Plans</h2>
+        <p class="eyebrow">Centralized DLL workflow</p>
+        <h2>DLL Requests and Lesson Plans</h2>
+        <p>Submissions are available only for active requests and assigned teaching workloads.</p>
       </div>
       <div class="toolbar-actions">
-        ${canSubmit ? `<button id="newLessonPlanButton" class="primary-button" type="button">Submit Lesson Plan</button>` : ""}
+        ${canManageRequests ? `<button id="newDllRequestButton" class="primary-button" type="button">Create DLL Request</button>` : ""}
       </div>
     </section>
-    <section id="lessonPlanAnalytics" class="attendance-analytics">
-      <p class="empty-state">Loading lesson plan analytics...</p>
-    </section>
-    <section class="table-card">
-      <div class="section-header">
-        <div><p class="eyebrow">${canReviewLessonPlan() ? "Reviewer monitoring" : "My pending DLLs"}</p><h2>Missing Lesson Plans</h2></div>
-      </div>
-      <div id="missingLessonPlansHost" class="table-wrap"><p class="empty-state">Loading missing lesson plans...</p></div>
-    </section>
-    ${canReviewLessonPlan() ? `
+    ${canManageRequests ? `
       <section class="table-card">
         <div class="section-header">
-          <div><p class="eyebrow">Reviewer monitoring</p><h2>Submitted, Not Yet Checked</h2></div>
+          <div><p class="eyebrow">Leadership controls</p><h2>DLL Submission Requests</h2></div>
         </div>
-        <div id="uncheckedLessonPlansHost" class="table-wrap"><p class="empty-state">Loading unchecked submissions...</p></div>
+        <div class="filter-grid dll-request-filters">
+          <label>Search<input id="dllRequestSearch" type="search" placeholder="Title, week, instructions, creator" /></label>
+          <label>School Year<select id="dllRequestSchoolYearFilter"></select></label>
+          <label>Term<select id="dllRequestTermFilter"></select></label>
+          <label>Status<select id="dllRequestStatusFilter"></select></label>
+        </div>
+        <div id="dllRequestTableHost" class="table-wrap"><p class="empty-state">Loading DLL requests...</p></div>
+      </section>
+    ` : ""}
+    ${canSubmit ? `
+      <section class="table-card">
+        <div class="section-header">
+          <div><p class="eyebrow">My teaching workload</p><h2>My Active DLL Requirements</h2></div>
+        </div>
+        <div id="myDllRequirementsHost"><p class="empty-state">Loading active DLL requests...</p></div>
+      </section>
+    ` : ""}
+    ${canReviewLessonPlan() ? `
+      <section class="table-card dll-compliance-panel">
+        <div class="section-header">
+          <div><p class="eyebrow">Request-based monitoring</p><h2>DLL Compliance</h2></div>
+          <label class="inline-filter">Selected Request<select id="dllComplianceRequestSelect"></select></label>
+        </div>
+        <div id="dllComplianceHost"><p class="empty-state">Loading request compliance...</p></div>
       </section>
     ` : ""}
     <section class="table-card">
+      <div class="section-header"><div><p class="eyebrow">Request-linked records</p><h2>DLL Submissions</h2></div></div>
       <div class="filter-grid">
         <label>Search<input id="lessonPlanSearch" type="search" placeholder="Teacher, subject, section" /></label>
         <label>Status<select id="lessonPlanStatusFilter"></select></label>
@@ -7770,40 +7952,80 @@ async function renderLessonPlanModule() {
       </div>
       <div id="lessonPlanTableHost" class="table-wrap"><p class="empty-state">Loading lesson plans...</p></div>
     </section>
+    <section class="table-card legacy-dll-panel">
+      <div class="section-header">
+        <div><p class="eyebrow">Historical records</p><h2>Legacy DLL Submissions</h2></div>
+      </div>
+      <p class="helper-text">These records predate centralized DLL requests. They remain viewable but are excluded from request compliance, dashboards, and pending totals.</p>
+      <div id="legacyLessonPlanTableHost" class="table-wrap"><p class="empty-state">Loading legacy submissions...</p></div>
+    </section>
   `;
   try {
-    await loadTeacherWorkloadTeachers();
-    await getTaskVisibilitySettings();
-    classRecordsCache = await getVisibleClasses();
-    teacherWorkloadRecordsCache = await getVisibleTeacherWorkloadRecords();
-    lessonPlanRecordsCache = await getVisibleLessonPlans();
+    await Promise.all([loadTeacherWorkloadTeachers(), getTaskVisibilitySettings()]);
+    [classRecordsCache, teacherWorkloadRecordsCache, dllRequestRecordsCache, lessonPlanRecordsCache] = await Promise.all([
+      getVisibleClasses(),
+      getVisibleTeacherWorkloadRecords(),
+      getVisibleDllRequests(),
+      getVisibleLessonPlans(),
+    ]);
+    classRecordsCache = mergeClassesWithWorkloadSections(classRecordsCache, teacherWorkloadRecordsCache);
+    if (!selectedDllRequestId || !dllRequestRecordsCache.some((requestRecord) => requestRecord.id === selectedDllRequestId)) {
+      selectedDllRequestId = [...dllRequestRecordsCache]
+        .sort((a, b) => (a.status === "Active" ? -1 : 1) - (b.status === "Active" ? -1 : 1) || (b.dueDate || "").localeCompare(a.dueDate || ""))[0]?.id || "";
+    }
     populateLessonPlanFilters();
     applyLessonPlanFilters();
   } catch (error) {
-    document.querySelector("#lessonPlanTableHost").innerHTML = `<p class="empty-state">Unable to load lesson plans: ${escapeHtml(error.message)}</p>`;
+    const host = document.querySelector("#lessonPlanTableHost");
+    if (host) host.innerHTML = `<p class="empty-state">Unable to load lesson plans: ${escapeHtml(error.message)}</p>`;
   }
 }
 
 function populateLessonPlanFilters() {
-  document.querySelector("#lessonPlanStatusFilter").innerHTML = optionList(["Submitted", "Noted", "Confirmed", "Returned for Revision"], "", "All statuses");
-  document.querySelector("#lessonPlanTypeFilter").innerHTML = optionList(submissionTypes, "", "All submission types");
+  const statusFilter = document.querySelector("#lessonPlanStatusFilter");
+  const typeFilter = document.querySelector("#lessonPlanTypeFilter");
+  if (statusFilter) statusFilter.innerHTML = optionList(["Submitted", "Noted", "Confirmed", "Returned for Revision"], "", "All statuses");
+  if (typeFilter) typeFilter.innerHTML = optionList(submissionTypes, "", "All submission types");
+  const requestSchoolYear = document.querySelector("#dllRequestSchoolYearFilter");
+  const requestTerm = document.querySelector("#dllRequestTermFilter");
+  const requestStatus = document.querySelector("#dllRequestStatusFilter");
+  if (requestSchoolYear) requestSchoolYear.innerHTML = optionList(uniqueOptions(dllRequestRecordsCache, "schoolYear"), "", "All school years");
+  if (requestTerm) requestTerm.innerHTML = optionList(termOptions, "", "All terms");
+  if (requestStatus) requestStatus.innerHTML = optionList(["Active", "Closed"], "", "Active and closed");
+  populateDllComplianceRequestSelect();
+}
+
+function populateDllComplianceRequestSelect() {
+  const select = document.querySelector("#dllComplianceRequestSelect");
+  if (!select) return;
+  const requests = [...dllRequestRecordsCache].sort((a, b) =>
+    (a.status === "Active" ? -1 : 1) - (b.status === "Active" ? -1 : 1)
+    || (b.dueDate || "").localeCompare(a.dueDate || "")
+  );
+  select.innerHTML = requests.length
+    ? requests.map((requestRecord) => `<option value="${escapeAttribute(requestRecord.id)}" ${requestRecord.id === selectedDllRequestId ? "selected" : ""}>${escapeHtml(requestRecord.title || "DLL Request")} - ${escapeHtml(requestRecord.schoolYear || "No SY")} / ${escapeHtml(requestRecord.term || "No term")} / ${escapeHtml(requestRecord.weekLabel || "No week")} (${escapeHtml(requestRecord.status || "")})</option>`).join("")
+    : `<option value="">No DLL requests</option>`;
 }
 
 function applyLessonPlanFilters() {
-  const host = document.querySelector("#lessonPlanTableHost");
-  if (!host) return;
+  applyDllRequestFilters();
+  renderMyDllRequirements();
+  renderDllCompliance();
   const search = (document.querySelector("#lessonPlanSearch")?.value || "").trim().toLowerCase();
   const status = document.querySelector("#lessonPlanStatusFilter")?.value || "";
   const type = document.querySelector("#lessonPlanTypeFilter")?.value || "";
-  filteredLessonPlans = lessonPlanRecordsCache.filter((record) => {
+  filteredLessonPlans = getUniqueRequestLessonPlans().filter((record) => {
+    const requestRecord = dllRequestRecordsCache.find((item) => item.id === record.requestId);
     const haystack = [
+      requestRecord?.title,
+      requestRecord?.weekLabel,
       record.teacherName,
       record.subjectName,
       record.sectionName,
       record.gradeLevel,
       subjectGradeSectionClassLabel(record),
       record.term,
-      record.weekNumber ? `Week ${record.weekNumber}` : "",
+      record.weekLabel,
       record.weekStart,
       record.status,
       record.submissionType,
@@ -7811,153 +8033,196 @@ function applyLessonPlanFilters() {
       record.teacherRemarks,
       record.reviewerRemarks,
     ].filter(Boolean).join(" ").toLowerCase();
-    return activeLessonPlanWeeks().includes(lessonPlanScopeKey(record))
+    return (!canReviewLessonPlan() || !selectedDllRequestId || record.requestId === selectedDllRequestId)
       && (!search || haystack.includes(search))
       && (!status || record.status === status)
       && (!type || record.submissionType === type);
   });
-  renderLessonPlanTable(host);
-  renderLessonPlanAnalytics();
-  renderPrincipalLessonPlanMonitoring();
+  renderLessonPlanTable(document.querySelector("#lessonPlanTableHost"));
+  renderLegacyLessonPlanTable();
 }
 
-function getVisibleLessonPlanRecordsForMonitoring() {
-  return lessonPlanRecordsCache.filter((record) => activeLessonPlanWeeks().includes(lessonPlanScopeKey(record)));
-}
-
-function buildMissingLessonPlanRows() {
-  const submittedKeys = new Set(getVisibleLessonPlanRecordsForMonitoring()
-    .map((record) => `${record.workloadId}:${lessonPlanScopeKey(record)}`));
-  return teacherWorkloadRecordsCache
-    .filter((workload) =>
-      workload.sectionId
-      && (canReviewLessonPlan() || workload.teacherId === auth.currentUser.uid)
-    )
-    .flatMap((workload) => activeLessonPlanWeeks().map((scopeKey) => {
-      if (submittedKeys.has(`${workload.id}:${scopeKey}`)) return null;
-      const scope = lessonPlanWeekOptions.find((item) => item.key === scopeKey);
-      return {
-        workload,
-        scopeKey,
-        term: scope?.term || scopeKey.split(":")[0] || "",
-        weekNumber: scope?.weekNumber || "",
-      };
-    }))
-    .filter(Boolean)
-    .sort((a, b) =>
-      (a.workload.teacherName || "").localeCompare(b.workload.teacherName || "")
-      || (a.term || "").localeCompare(b.term || "")
-      || Number(a.weekNumber || 0) - Number(b.weekNumber || 0)
-    );
-}
-
-function renderPrincipalLessonPlanMonitoring() {
-  const missingHost = document.querySelector("#missingLessonPlansHost");
-  const uncheckedHost = document.querySelector("#uncheckedLessonPlansHost");
-  if (!missingHost && !uncheckedHost) return;
-
-  const search = (document.querySelector("#lessonPlanSearch")?.value || "").trim().toLowerCase();
-  const type = document.querySelector("#lessonPlanTypeFilter")?.value || "";
-  const missingRows = buildMissingLessonPlanRows().filter(({ workload, term, weekNumber }) => {
-    const haystack = [
-      workload.teacherName,
-      workload.subjectName,
-      workload.sectionName,
-      workload.gradeLevel,
-      subjectGradeSectionClassLabel(workload),
-      term,
-      weekNumber ? `Week ${weekNumber}` : "",
-    ].filter(Boolean).join(" ").toLowerCase();
-    return !search || haystack.includes(search);
-  });
-
-  const uncheckedRows = getVisibleLessonPlanRecordsForMonitoring()
-    .filter((record) => record.status === "Submitted")
-    .filter((record) => !type || record.submissionType === type)
-    .filter((record) => {
-      const haystack = [
-        record.teacherName,
-        record.subjectName,
-        record.sectionName,
-        record.gradeLevel,
-        subjectGradeSectionClassLabel(record),
-        record.term,
-        record.weekNumber ? `Week ${record.weekNumber}` : "",
-        record.submissionType,
-        record.teacherRemarks,
-      ].filter(Boolean).join(" ").toLowerCase();
-      return !search || haystack.includes(search);
-    })
-    .sort((a, b) => (a.teacherName || "").localeCompare(b.teacherName || "") || (a.term || "").localeCompare(b.term || "") || Number(a.weekNumber || 0) - Number(b.weekNumber || 0));
-
-  if (missingHost) {
-    missingHost.innerHTML = missingRows.length ? `
-    <table class="compliance-table">
-      <thead><tr><th>Teacher</th><th>Class</th><th>Missing Week</th><th>Status</th></tr></thead>
-      <tbody>
-        ${missingRows.map(({ workload, term, weekNumber }) => `
-          <tr>
-            <td>
-              ${escapeHtml(workload.teacherName || "Teacher")}
-              <small class="row-note">${escapeHtml(workload.department || workload.subjectArea || "")}</small>
-            </td>
-            <td><strong>${escapeHtml(subjectGradeSectionClassLabel(workload))}</strong></td>
-            <td>${escapeHtml(term)} - Week ${escapeHtml(weekNumber)}</td>
-            <td><span class="badge status-not-submitted">Not Submitted</span></td>
-          </tr>
-        `).join("")}
-      </tbody>
-    </table>
-  ` : `<p class="empty-state">All visible class weeks have lesson plan submissions.</p>`;
-  }
-
-  if (uncheckedHost) {
-    uncheckedHost.innerHTML = uncheckedRows.length ? `
-    <table class="compliance-table">
-      <thead><tr><th>Teacher</th><th>Class</th><th>Week</th><th>Submission</th><th>Action</th></tr></thead>
-      <tbody>
-        ${uncheckedRows.map((record) => `
-          <tr>
-            <td>${escapeHtml(record.teacherName || "Teacher")}<small class="row-note">${escapeHtml(record.teacherRole || "")}</small></td>
-            <td><strong>${escapeHtml(subjectGradeSectionClassLabel(record))}</strong></td>
-            <td>${escapeHtml(record.term || "")} - Week ${escapeHtml(record.weekNumber || "")}<small class="row-note">${escapeHtml(record.weekStart || "")}</small></td>
-            <td>${escapeHtml(record.submissionType || "Submitted")}<small class="row-note">${record.fileLink ? `<a href="${escapeHtml(record.fileLink)}" target="_blank" rel="noopener">Open DLL</a>` : "Hard copy / no link"}</small></td>
-            <td><button class="secondary-button review-lesson-plan" type="button" data-id="${escapeHtml(record.id)}">Review</button></td>
-          </tr>
-        `).join("")}
-      </tbody>
-    </table>
-  ` : `<p class="empty-state">No submitted lesson plans are waiting for checking.</p>`;
-  }
-}
-
-function renderLessonPlanAnalytics() {
-  const host = document.querySelector("#lessonPlanAnalytics");
+function applyDllRequestFilters() {
+  const host = document.querySelector("#dllRequestTableHost");
   if (!host) return;
-  const visibleWeeks = activeLessonPlanWeeks();
-  const visibleRecords = lessonPlanRecordsCache.filter((record) => visibleWeeks.includes(lessonPlanScopeKey(record)));
-  const workloads = teacherWorkloadRecordsCache.filter((workload) => workload.sectionId);
-  const expected = workloads.length * visibleWeeks.length;
-  const submitted = new Set(visibleRecords.map((record) => `${record.workloadId}:${lessonPlanScopeKey(record)}`)).size;
-  const reviewed = visibleRecords.filter((record) => ["Noted", "Confirmed"].includes(record.status)).length;
-  const unchecked = visibleRecords.filter((record) => record.status === "Submitted").length;
+  const search = (document.querySelector("#dllRequestSearch")?.value || "").trim().toLowerCase();
+  const schoolYear = document.querySelector("#dllRequestSchoolYearFilter")?.value || "";
+  const term = document.querySelector("#dllRequestTermFilter")?.value || "";
+  const status = document.querySelector("#dllRequestStatusFilter")?.value || "";
+  filteredDllRequests = dllRequestRecordsCache.filter((requestRecord) => {
+    const haystack = [
+      requestRecord.title,
+      requestRecord.schoolYear,
+      requestRecord.term,
+      requestRecord.weekLabel,
+      requestRecord.instructions,
+      requestRecord.createdByName,
+      requestRecord.createdByRole,
+    ].filter(Boolean).join(" ").toLowerCase();
+    return (!search || haystack.includes(search))
+      && (!schoolYear || requestRecord.schoolYear === schoolYear)
+      && (!term || requestRecord.term === term)
+      && (!status || requestRecord.status === status);
+  }).sort((a, b) =>
+    (a.status === "Active" ? -1 : 1) - (b.status === "Active" ? -1 : 1)
+    || (b.dueDate || "").localeCompare(a.dueDate || "")
+  );
+  renderDllRequestTable(host);
+}
+
+function renderDllRequestTable(host) {
+  if (!host) return;
+  if (!filteredDllRequests.length) {
+    host.innerHTML = `<p class="empty-state">No DLL requests match the current filters.</p>`;
+    return;
+  }
   host.innerHTML = `
+    <table class="compliance-table dll-request-table">
+      <thead><tr><th>Request</th><th>Schedule</th><th>Due Date</th><th>Status</th><th>Created By</th><th>Actions</th></tr></thead>
+      <tbody>
+        ${filteredDllRequests.map((requestRecord) => `
+          <tr class="${requestRecord.id === selectedDllRequestId ? "selected-row" : ""}">
+            <td><strong>${escapeHtml(requestRecord.title || "Weekly DLL Submission")}</strong><small class="row-note">${escapeHtml(requestRecord.instructions || "No instructions")}</small></td>
+            <td>${escapeHtml(requestRecord.schoolYear || "No school year")} / ${escapeHtml(requestRecord.term || "No term")}<small class="row-note">${escapeHtml(requestRecord.weekLabel || "No week")} · ${escapeHtml(requestRecord.weekStart || "No start")} to ${escapeHtml(requestRecord.weekEnd || "No end")}</small></td>
+            <td>${escapeHtml(requestRecord.dueDate || "No due date")}</td>
+            <td><span class="badge status-${statusClass(requestRecord.status)}">${escapeHtml(requestRecord.status || "Active")}</span></td>
+            <td>${escapeHtml(requestRecord.createdByName || "Unknown")}<small class="row-note">${escapeHtml(requestRecord.createdByRole || "")}</small></td>
+            <td><div class="row-actions">
+              <button class="secondary-button view-dll-compliance" type="button" data-id="${escapeAttribute(requestRecord.id)}">View Compliance</button>
+              ${canManageDllRequest(requestRecord) ? `<button class="secondary-button edit-dll-request" type="button" data-id="${escapeAttribute(requestRecord.id)}">Edit</button>` : ""}
+              ${canManageDllRequest(requestRecord) ? `<button class="${requestRecord.status === "Active" ? "danger-button" : "secondary-button"} toggle-dll-request-status" type="button" data-id="${escapeAttribute(requestRecord.id)}" data-status="${requestRecord.status === "Active" ? "Closed" : "Active"}">${requestRecord.status === "Active" ? "Close" : "Reopen"}</button>` : ""}
+            </div></td>
+          </tr>
+        `).join("")}
+      </tbody>
+    </table>
+  `;
+}
+
+function renderMyDllRequirements() {
+  const host = document.querySelector("#myDllRequirementsHost");
+  if (!host) return;
+  const activeRequests = dllRequestRecordsCache.filter((requestRecord) => requestRecord.status === "Active");
+  if (!activeRequests.length) {
+    host.innerHTML = `<p class="empty-state">No active DLL submission requests.</p>`;
+    return;
+  }
+  const rows = activeRequests.flatMap((requestRecord) =>
+    buildDllExpectedRows(requestRecord, teacherWorkloadRecordsCache, lessonPlanRecordsCache, auth.currentUser.uid)
+  );
+  if (!rows.length) {
+    host.innerHTML = `<p class="empty-state">No active DLL requests apply to your current teaching workload.</p>`;
+    return;
+  }
+  host.innerHTML = `<div class="dll-requirement-grid">${rows.map(renderMyDllRequirementCard).join("")}</div>`;
+}
+
+function renderMyDllRequirementCard({ request: requestRecord, workload, record }) {
+  const status = record?.status || "Pending";
+  const canEdit = !record || ["Submitted", "Returned for Revision"].includes(status);
+  const actionLabel = !record ? "Submit DLL" : status === "Returned for Revision" ? "Correct and Resubmit" : "Edit Submission";
+  return `
+    <article class="dll-requirement-card ${status === "Returned for Revision" ? "needs-revision" : ""}">
+      <div class="dll-card-heading">
+        <div><p class="eyebrow">${escapeHtml(requestRecord.weekLabel || "DLL Request")}</p><h3>${escapeHtml(requestRecord.title || "Weekly DLL Submission")}</h3></div>
+        <span class="badge status-${statusClass(status)}">${escapeHtml(status)}</span>
+      </div>
+      <dl class="dll-request-details">
+        <div><dt>Schedule</dt><dd>${escapeHtml(requestRecord.weekStart || "No start")} to ${escapeHtml(requestRecord.weekEnd || "No end")}</dd></div>
+        <div><dt>Due</dt><dd>${escapeHtml(requestRecord.dueDate || "No due date")}</dd></div>
+        <div><dt>Subject</dt><dd>${escapeHtml(workload.subjectName || "No subject")}</dd></div>
+        <div><dt>Grade / Section</dt><dd>${escapeHtml(`${workload.gradeLevel || "No grade"} - ${workload.sectionName || "No section"}`)}</dd></div>
+      </dl>
+      <p class="dll-instructions">${escapeHtml(requestRecord.instructions || "No additional instructions.")}</p>
+      ${record?.reviewerRemarks ? `<p class="dll-review-remarks"><strong>Reviewer remarks:</strong> ${escapeHtml(record.reviewerRemarks)}</p>` : ""}
+      <div class="row-actions">
+        ${record?.fileLink ? `<a class="secondary-button" href="${escapeAttribute(record.fileLink)}" target="_blank" rel="noopener">Open DLL</a>` : ""}
+        ${canEdit ? `<button class="primary-button submit-request-dll" type="button" data-request-id="${escapeAttribute(requestRecord.id)}" data-workload-id="${escapeAttribute(workload.id)}">${actionLabel}</button>` : `<span class="row-note">This reviewed submission is locked.</span>`}
+      </div>
+    </article>
+  `;
+}
+
+function renderDllCompliance() {
+  const host = document.querySelector("#dllComplianceHost");
+  if (!host) return;
+  const requestRecord = dllRequestRecordsCache.find((item) => item.id === selectedDllRequestId);
+  if (!requestRecord) {
+    host.innerHTML = `<p class="empty-state">Create or select a DLL request to view compliance.</p>`;
+    return;
+  }
+  const rows = buildDllExpectedRows(requestRecord);
+  const teacherGroups = new Map();
+  rows.forEach((row) => {
+    const key = row.workload.teacherId || "unknown";
+    if (!teacherGroups.has(key)) teacherGroups.set(key, []);
+    teacherGroups.get(key).push(row);
+  });
+  const completedStatuses = ["Submitted", "Noted", "Confirmed"];
+  const completedTeacherIds = new Set([...teacherGroups.entries()]
+    .filter(([, teacherRows]) => teacherRows.length && teacherRows.every((row) => completedStatuses.includes(row.status)))
+    .map(([teacherId]) => teacherId));
+  const completedRows = rows.filter((row) => completedTeacherIds.has(row.workload.teacherId));
+  const pendingRows = requestRecord.status === "Active" ? rows.filter((row) => row.status === "Pending") : [];
+  const uncheckedRows = rows.filter((row) => row.status === "Submitted");
+  const reviewedRows = rows.filter((row) => ["Noted", "Confirmed"].includes(row.status));
+  const returnedRows = rows.filter((row) => row.status === "Returned for Revision");
+  const submitted = rows.filter((row) => row.record).length;
+  const completed = rows.filter((row) => completedStatuses.includes(row.status)).length;
+  const completion = rows.length ? Math.round((completed / rows.length) * 100) : 0;
+  host.innerHTML = `
+    <div class="dll-selected-request-summary">
+      <div><strong>${escapeHtml(requestRecord.title || "DLL Request")}</strong><span>${escapeHtml(requestRecord.schoolYear || "")} · ${escapeHtml(requestRecord.term || "")} · ${escapeHtml(requestRecord.weekLabel || "")}</span></div>
+      <span class="badge status-${statusClass(requestRecord.status)}">${escapeHtml(requestRecord.status || "")}</span>
+    </div>
+    ${requestRecord.status === "Closed" ? `<p class="helper-text">This request is closed. It remains available for historical review but does not generate current pending requirements.</p>` : ""}
     ${renderAttendanceKpiGrid([
-      ["Submitted DLLs", String(submitted), `${expected} expected class-week submissions`],
-      ["Pending DLLs", String(Math.max(expected - submitted, 0)), "Based on Principal visibility"],
-      ["Unchecked", String(unchecked), "Submitted but not yet checked"],
-      ["Reviewed", String(reviewed), "Noted or confirmed submissions"],
-      ["Visible Weeks", String(visibleWeeks.length), "Configured in School Setup"],
+      ["Total Expected", String(rows.length), "Applicable teaching workloads"],
+      ["Submitted", String(submitted), "Unique request/workload/teacher records"],
+      ["Pending", String(pendingRows.length), requestRecord.status === "Active" ? "Not yet submitted" : "Closed request"],
+      ["Unchecked", String(uncheckedRows.length), "Submitted but not yet checked"],
+      ["Reviewed", String(reviewedRows.length), "Noted or confirmed"],
+      ["Returned for Revision", String(returnedRows.length), "Teacher action required"],
+      ["Completion", `${completion}%`, `${completed} of ${rows.length} currently compliant`],
     ])}
-    <div class="chart-grid attendance-chart-grid">
-      ${renderSummaryChart("DLL Status", ["Submitted", "Noted", "Confirmed", "Returned for Revision"].map((status) => [status, visibleRecords.filter((record) => record.status === status).length]))}
+    <div class="dll-compliance-sections">
+      ${renderDllComplianceSection("Teachers Who Completed All Required Submissions", completedRows, "No teacher has completed every required submission for this request.")}
+      ${renderDllComplianceSection("Teachers With Pending Submissions", pendingRows, requestRecord.status === "Active" ? "No pending submissions for this request." : "Closed requests do not create current pending submissions.")}
+      ${renderDllComplianceSection("Submitted but Not Yet Checked", uncheckedRows, "No submissions are waiting for review.")}
+      ${renderDllComplianceSection("Returned for Revision", returnedRows, "No submissions are currently returned for revision.")}
     </div>
   `;
 }
 
+function renderDllComplianceSection(title, rows, emptyMessage) {
+  return `
+    <section class="dll-compliance-section">
+      <div class="section-header"><h3>${escapeHtml(title)}</h3><span class="badge">${rows.length}</span></div>
+      ${rows.length ? `
+        <div class="table-wrap">
+          <table class="compact-table">
+            <thead><tr><th>Teacher</th><th>Subject</th><th>Grade Level</th><th>Section</th><th>Status</th><th>Submission</th></tr></thead>
+            <tbody>${rows.map(({ workload, record, status }) => `
+              <tr>
+                <td>${escapeHtml(workload.teacherName || record?.teacherName || "Teacher")}</td>
+                <td>${escapeHtml(workload.subjectName || record?.subjectName || "No subject")}</td>
+                <td>${escapeHtml(workload.gradeLevel || record?.gradeLevel || "No grade")}</td>
+                <td>${escapeHtml(workload.sectionName || record?.sectionName || "No section")}</td>
+                <td><span class="badge status-${statusClass(status)}">${escapeHtml(status)}</span></td>
+                <td>${record ? `${escapeHtml(record.submissionType || "Submitted")}${record.fileLink ? `<small class="row-note"><a href="${escapeAttribute(record.fileLink)}" target="_blank" rel="noopener">Open DLL</a></small>` : `<small class="row-note">${escapeHtml(record.submittedTo || "Hard copy")}</small>`}` : `<span class="row-note">No submission</span>`}</td>
+              </tr>
+            `).join("")}</tbody>
+          </table>
+        </div>
+      ` : `<p class="empty-state">${escapeHtml(emptyMessage)}</p>`}
+    </section>
+  `;
+}
+
 function renderLessonPlanTable(host) {
+  if (!host) return;
   if (!filteredLessonPlans.length) {
-    host.innerHTML = `<p class="empty-state">No lesson plan submissions match the current view.</p>`;
+    host.innerHTML = `<p class="empty-state">No request-linked DLL submissions match the current view.</p>`;
     return;
   }
   host.innerHTML = `
@@ -7966,7 +8231,7 @@ function renderLessonPlanTable(host) {
         <tr>
           <th>Teacher</th>
           <th>Class</th>
-          <th>Week</th>
+          <th>Request</th>
           <th>Submission</th>
           <th>Status</th>
           <th>Review</th>
@@ -7981,10 +8246,13 @@ function renderLessonPlanTable(host) {
 }
 
 function renderLessonPlanRow(record) {
+  const requestRecord = dllRequestRecordsCache.find((item) => item.id === record.requestId);
   const fileLink = record.fileLink
-    ? `<a href="${escapeHtml(record.fileLink)}" target="_blank" rel="noopener">Open DLL</a>`
-    : `<span class="row-note">Hard copy / no link</span>`;
-  const canEdit = record.teacherId === auth.currentUser.uid;
+    ? `<a href="${escapeAttribute(record.fileLink)}" target="_blank" rel="noopener">Open DLL</a>`
+    : `<span class="row-note">Hard copy · ${escapeHtml(record.submittedTo || "Receiver not recorded")}</span>`;
+  const canEdit = record.teacherId === auth.currentUser.uid
+    && requestRecord?.status === "Active"
+    && ["Submitted", "Returned for Revision"].includes(record.status);
   const canReview = canReviewLessonPlan();
   return `
     <tr>
@@ -7994,8 +8262,9 @@ function renderLessonPlanRow(record) {
       </td>
       <td><strong>${escapeHtml(subjectGradeSectionClassLabel(record))}</strong></td>
       <td>
-        ${escapeHtml(record.term || "Term not set")} ${record.weekNumber ? `- Week ${escapeHtml(record.weekNumber)}` : ""}
-        <small class="row-note">${escapeHtml(record.weekStart || "No date")}</small>
+        <strong>${escapeHtml(requestRecord?.title || record.requestTitle || "DLL Request")}</strong>
+        <small class="row-note">${escapeHtml(record.term || requestRecord?.term || "Term not set")} · ${escapeHtml(record.weekLabel || requestRecord?.weekLabel || "Week not set")}</small>
+        <small class="row-note">${escapeHtml(record.weekStart || requestRecord?.weekStart || "No start")} to ${escapeHtml(record.weekEnd || requestRecord?.weekEnd || "No end")} · Due ${escapeHtml(record.dueDate || requestRecord?.dueDate || "Not set")}</small>
       </td>
       <td>
         ${escapeHtml(record.submissionType || "No submission")}
@@ -8010,152 +8279,352 @@ function renderLessonPlanRow(record) {
       </td>
       <td>
         <div class="row-actions">
-          ${canEdit ? `<button class="secondary-button edit-lesson-plan" type="button" data-id="${escapeHtml(record.id)}">Edit</button>` : ""}
-          ${canReview ? `<button class="secondary-button review-lesson-plan" type="button" data-id="${escapeHtml(record.id)}">Review</button>` : ""}
+          ${canEdit ? `<button class="secondary-button edit-lesson-plan" type="button" data-id="${escapeAttribute(record.id)}">Edit</button>` : ""}
+          ${canReview ? `<button class="secondary-button review-lesson-plan" type="button" data-id="${escapeAttribute(record.id)}">Review</button>` : ""}
         </div>
       </td>
     </tr>
   `;
 }
 
-function openLessonPlanForm(record = null) {
-  const encodableWorkloads = teacherWorkloadRecordsCache.filter(canSubmitLessonPlanForWorkload);
-  const selectedWorkload = encodableWorkloads.find((workload) => workload.id === record?.workloadId) || encodableWorkloads[0];
-  const workloadOptions = encodableWorkloads
-    .map((item) => `<option value="${escapeHtml(item.id)}" ${item.id === selectedWorkload?.id ? "selected" : ""}>${escapeHtml(gradeWorkloadLabel(item))}</option>`)
-    .join("");
-  const hasWorkloads = encodableWorkloads.length > 0;
+function renderLegacyLessonPlanTable() {
+  const host = document.querySelector("#legacyLessonPlanTableHost");
+  if (!host) return;
+  const records = getLegacyLessonPlans().sort((a, b) => lessonPlanRecordUpdatedAt(b) - lessonPlanRecordUpdatedAt(a));
+  if (!records.length) {
+    host.innerHTML = `<p class="empty-state">No legacy DLL submissions are visible.</p>`;
+    return;
+  }
+  host.innerHTML = `
+    <table class="compliance-table">
+      <thead><tr><th>Teacher</th><th>Class</th><th>Legacy Week</th><th>Submission</th><th>Status</th></tr></thead>
+      <tbody>${records.map((record) => `
+        <tr>
+          <td>${escapeHtml(record.teacherName || "Teacher")}</td>
+          <td>${escapeHtml(subjectGradeSectionClassLabel(record))}</td>
+          <td>${escapeHtml(record.term || "No term")} ${record.weekNumber ? `- Week ${escapeHtml(record.weekNumber)}` : ""}<small class="row-note">${escapeHtml(record.weekStart || "No date")}</small></td>
+          <td>${escapeHtml(record.submissionType || "Not recorded")}<small class="row-note">${record.fileLink && isValidUrl(record.fileLink) ? `<a href="${escapeAttribute(record.fileLink)}" target="_blank" rel="noopener">Open DLL</a>` : escapeHtml(record.submittedTo || "No link")}</small></td>
+          <td><span class="badge status-${statusClass(record.status)}">${escapeHtml(record.status || "Submitted")}</span></td>
+        </tr>
+      `).join("")}</tbody>
+    </table>
+  `;
+}
+
+function defaultDllSchoolYear() {
+  const values = [...new Set([
+    ...teacherWorkloadRecordsCache.map(workloadSchoolYear),
+    ...classRecordsCache.map((record) => record.schoolYear || ""),
+  ].filter(Boolean))].sort().reverse();
+  return values[0] || "";
+}
+
+function openDllRequestForm(requestRecord = null) {
+  const defaultTerm = activeGradeTerms(taskVisibilitySettingsCache || defaultTaskVisibilitySettings())[0] || termOptions[0];
   els.dashboardContent.insertAdjacentHTML("beforeend", `
     <div id="academicModal" class="modal-backdrop">
-      <form id="lessonPlanForm" class="modal wide-modal">
+      <form id="dllRequestForm" class="modal wide-modal" data-id="${escapeAttribute(requestRecord?.id || "")}">
         <div class="modal-header">
-          <div><p class="eyebrow">DLL / Lesson Plan</p><h2>${record ? "Update Lesson Plan" : "Submit Lesson Plan"}</h2></div>
+          <div><p class="eyebrow">Central DLL request</p><h2>${requestRecord ? "Edit DLL Request" : "Create DLL Request"}</h2></div>
           <button class="icon-button close-academic-modal" type="button" aria-label="Close">x</button>
         </div>
         <div class="form-grid learner-form-grid">
-          <label>Class<select id="lessonPlanWorkloadId" required>${workloadOptions}</select></label>
-          <label>Term<select id="lessonPlanTerm" required>${optionList([...new Set(lessonPlanWeekOptions.filter((item) => activeLessonPlanWeeks().includes(item.key)).map((item) => item.term))], record?.term || "", "Select term")}</select></label>
-          <label>Week<select id="lessonPlanWeekNumber" required></select></label>
-          <label>Week Start<input id="lessonPlanWeekStart" type="date" required value="${escapeHtml(record?.weekStart || todayIso())}" /></label>
-          <label>Submission Type<select id="lessonPlanSubmissionType" required>${optionList(submissionTypes, record?.submissionType || "", "Select type")}</select></label>
-          <label id="lessonPlanFileField">DLL Link<input id="lessonPlanFileLink" type="url" placeholder="https://..." value="${escapeHtml(record?.fileLink || "")}" /></label>
+          <label class="form-field-wide">Title<input id="dllRequestTitle" required value="${escapeAttribute(requestRecord?.title || "Weekly DLL Submission")}" /></label>
+          <label>School Year<input id="dllRequestSchoolYear" required value="${escapeAttribute(requestRecord?.schoolYear || defaultDllSchoolYear())}" placeholder="2026-2027" /></label>
+          <label>Term<select id="dllRequestTerm" required>${optionList(termOptions, requestRecord?.term || defaultTerm, "Select term")}</select></label>
+          <label>Week Label<input id="dllRequestWeekLabel" required value="${escapeAttribute(requestRecord?.weekLabel || "Week 1")}" placeholder="Week 1" /></label>
+          <label>Week Start<input id="dllRequestWeekStart" type="date" required value="${escapeAttribute(requestRecord?.weekStart || todayIso())}" /></label>
+          <label>Week End<input id="dllRequestWeekEnd" type="date" required value="${escapeAttribute(requestRecord?.weekEnd || todayIso())}" /></label>
+          <label>Due Date<input id="dllRequestDueDate" type="date" required value="${escapeAttribute(requestRecord?.dueDate || requestRecord?.weekEnd || todayIso())}" /></label>
+          <label>Status<select id="dllRequestStatus" required>${optionList(["Active", "Closed"], requestRecord?.status || "Active", "Select status")}</select></label>
         </div>
-        ${hasWorkloads ? "" : `<p class="empty-state">No assigned classes are available for lesson plan submission.</p>`}
-        <label class="modal-field">Teacher Remarks<textarea id="lessonPlanTeacherRemarks" rows="4">${escapeHtml(record?.teacherRemarks || "")}</textarea></label>
+        <label class="modal-field">Instructions<textarea id="dllRequestInstructions" rows="5" required>${escapeHtml(requestRecord?.instructions || "")}</textarea></label>
         <div id="academicFormMessage" class="message hidden" role="status"></div>
         <div class="modal-actions">
           <button class="secondary-button close-academic-modal" type="button">Cancel</button>
-          <button class="primary-button" type="submit" ${hasWorkloads ? "" : "disabled"}>${record ? "Save Changes" : "Submit Lesson Plan"}</button>
+          <button class="primary-button" type="submit">${requestRecord ? "Save Request" : "Create Request"}</button>
         </div>
       </form>
     </div>
   `);
-  const syncFileLink = () => {
-    const type = document.querySelector("#lessonPlanSubmissionType").value;
+}
+
+async function handleDllRequestFormSubmit(event) {
+  event.preventDefault();
+  const message = document.querySelector("#academicFormMessage");
+  const submitButton = event.submitter || event.target.querySelector("button[type='submit']");
+  if (submitButton?.disabled || !canManageDllRequests()) return;
+  const existing = dllRequestRecordsCache.find((requestRecord) => requestRecord.id === event.target.dataset.id) || null;
+  const data = {
+    title: document.querySelector("#dllRequestTitle").value.trim(),
+    schoolYear: document.querySelector("#dllRequestSchoolYear").value.trim(),
+    term: document.querySelector("#dllRequestTerm").value,
+    weekLabel: document.querySelector("#dllRequestWeekLabel").value.trim(),
+    weekStart: document.querySelector("#dllRequestWeekStart").value,
+    weekEnd: document.querySelector("#dllRequestWeekEnd").value,
+    dueDate: document.querySelector("#dllRequestDueDate").value,
+    instructions: document.querySelector("#dllRequestInstructions").value.trim(),
+    status: document.querySelector("#dllRequestStatus").value,
+    updatedAt: serverTimestamp(),
+  };
+  if (Object.values(data).slice(0, 8).some((value) => !value) || !["Active", "Closed"].includes(data.status)) {
+    message.textContent = "Complete all required DLL request fields.";
+    message.classList.add("error");
+    message.classList.remove("hidden");
+    return;
+  }
+  if (data.weekEnd < data.weekStart) {
+    message.textContent = "Week End cannot be earlier than Week Start.";
+    message.classList.add("error");
+    message.classList.remove("hidden");
+    return;
+  }
+  if (data.dueDate < data.weekStart) {
+    message.textContent = "Due Date cannot be earlier than Week Start.";
+    message.classList.add("error");
+    message.classList.remove("hidden");
+    return;
+  }
+  if (existing && !canManageDllRequest(existing)) return;
+  if (submitButton) submitButton.disabled = true;
+  try {
+    let requestId = existing?.id || "";
+    if (existing) {
+      await updateDoc(doc(db, "dllRequests", existing.id), data);
+      await createAuditLog("update", "DLL Requests", existing.id, existing, data);
+      if (existing.status !== data.status) await notifyDllRequestAudience({ ...existing, ...data, id: existing.id }, "status");
+    } else {
+      const createdData = {
+        ...data,
+        createdByUid: auth.currentUser.uid,
+        createdByName: currentUserProfile.fullName || auth.currentUser.email,
+        createdByRole: primaryRole(currentUserProfile),
+        createdAt: serverTimestamp(),
+      };
+      const created = await addDoc(collection(db, "dllRequests"), createdData);
+      requestId = created.id;
+      await createAuditLog("create", "DLL Requests", created.id, null, createdData);
+      await notifyDllRequestAudience({ ...createdData, id: created.id }, "created");
+    }
+    document.querySelector("#academicModal")?.remove();
+    selectedDllRequestId = requestId;
+    await renderLessonPlanModule();
+    showDashboardMessage(existing ? "DLL request updated." : "DLL request created.");
+  } catch (error) {
+    message.textContent = `Save failed: ${error.message}`;
+    message.classList.add("error");
+    message.classList.remove("hidden");
+    if (submitButton) submitButton.disabled = false;
+  }
+}
+
+async function notifyDllRequestAudience(requestRecord, eventType) {
+  try {
+    await loadAcademicTeachers();
+    const teacherIds = new Set(lessonPlanWorkloadsForRequest(requestRecord, teacherWorkloadRecordsCache).map((workload) => workload.teacherId));
+    const recipients = academicTeachersCache.filter((user) =>
+      teacherIds.has(user.uid || user.id)
+      && (user.uid || user.id) !== auth.currentUser.uid
+    ).map((user) => ({ ...user, uid: user.uid || user.id }));
+    const isCreated = eventType === "created";
+    const isActive = requestRecord.status === "Active";
+    await Promise.all(recipients.map((user) => createDirectNotification(user, {
+      notificationType: isCreated ? "dll_request_created" : "dll_request_status_changed",
+      title: isCreated ? "New DLL submission request" : `DLL request ${isActive ? "reopened" : "closed"}`,
+      message: `${requestRecord.title || "Weekly DLL Submission"} (${requestRecord.weekLabel || "requested week"}) was ${isCreated ? "created" : isActive ? "reopened" : "closed"}.`,
+      relatedModule: "Lesson Plans",
+      relatedRecordId: requestRecord.id,
+      actionUrl: "#Lesson Plans",
+    }))));
+  } catch (error) {
+    console.warn("DLL request notifications were not created:", error);
+  }
+}
+
+async function updateDllRequestStatus(requestId, status, button = null) {
+  const requestRecord = dllRequestRecordsCache.find((item) => item.id === requestId);
+  if (!requestRecord || !canManageDllRequest(requestRecord) || !["Active", "Closed"].includes(status)) return;
+  if (button) button.disabled = true;
+  try {
+    const changes = { status, updatedAt: serverTimestamp() };
+    await updateDoc(doc(db, "dllRequests", requestId), changes);
+    await createAuditLog("update", "DLL Requests", requestId, requestRecord, changes);
+    await notifyDllRequestAudience({ ...requestRecord, status }, "status");
+    selectedDllRequestId = requestId;
+    await renderLessonPlanModule();
+    showDashboardMessage(`DLL request ${status === "Active" ? "reopened" : "closed"}.`);
+  } catch (error) {
+    if (button) button.disabled = false;
+    showDashboardMessage(`Request update failed: ${error.message}`, true);
+  }
+}
+
+async function notifyDllReviewers(record, isResubmission) {
+  try {
+    await loadAcademicTeachers();
+    const reviewers = academicTeachersCache.filter((user) =>
+      hasAnyRole(user, ["Principal", "Master Teacher", "Head Teacher"])
+      && (user.uid || user.id) !== auth.currentUser.uid
+    ).map((user) => ({ ...user, uid: user.uid || user.id }));
+    await Promise.all(reviewers.map((user) => createDirectNotification(user, {
+      notificationType: isResubmission ? "lesson_plan_resubmitted" : "lesson_plan_submitted",
+      title: isResubmission ? "DLL resubmitted" : "DLL submitted",
+      message: `${record.teacherName} ${isResubmission ? "resubmitted" : "submitted"} ${subjectGradeSectionClassLabel(record)} for ${record.weekLabel || "a DLL request"}.`,
+      relatedModule: "Lesson Plans",
+      relatedRecordId: record.id,
+      actionUrl: "#Lesson Plans",
+    }))));
+  } catch (error) {
+    console.warn("DLL reviewer notifications were not created:", error);
+  }
+}
+
+function openLessonPlanForm(requestRecord, workload, record = null) {
+  if (!requestRecord || requestRecord.status !== "Active" || !workload || !canSubmitLessonPlanForWorkload(workload)) return;
+  els.dashboardContent.insertAdjacentHTML("beforeend", `
+    <div id="academicModal" class="modal-backdrop">
+      <form id="lessonPlanForm" class="modal wide-modal" data-request-id="${escapeAttribute(requestRecord.id)}" data-workload-id="${escapeAttribute(workload.id)}">
+        <div class="modal-header">
+          <div><p class="eyebrow">${escapeHtml(requestRecord.weekLabel || "DLL Request")}</p><h2>${record ? "Update DLL Submission" : "Submit DLL"}</h2></div>
+          <button class="icon-button close-academic-modal" type="button" aria-label="Close">x</button>
+        </div>
+        <div class="dll-form-context">
+          <strong>${escapeHtml(requestRecord.title || "Weekly DLL Submission")}</strong>
+          <span>${escapeHtml(subjectGradeSectionClassLabel(workload))}</span>
+          <small>${escapeHtml(requestRecord.weekStart || "")} to ${escapeHtml(requestRecord.weekEnd || "")} · Due ${escapeHtml(requestRecord.dueDate || "Not set")}</small>
+          <p>${escapeHtml(requestRecord.instructions || "No additional instructions.")}</p>
+        </div>
+        <div class="form-grid learner-form-grid">
+          <label>Submission Type<select id="lessonPlanSubmissionType" required>${optionList(submissionTypes, record?.submissionType || "", "Select type")}</select></label>
+          <label id="lessonPlanFileField">DLL Share Link<input id="lessonPlanFileLink" type="url" placeholder="https://..." value="${escapeAttribute(record?.fileLink || "")}" /></label>
+          <label id="lessonPlanSubmittedToField">Submitted To<input id="lessonPlanSubmittedTo" value="${escapeAttribute(record?.submittedTo || "")}" placeholder="Receiving person or office" /></label>
+        </div>
+        <label class="modal-field">Teacher Remarks<textarea id="lessonPlanTeacherRemarks" rows="4">${escapeHtml(record?.teacherRemarks || "")}</textarea></label>
+        ${record?.reviewerRemarks ? `<p class="dll-review-remarks"><strong>Reviewer remarks:</strong> ${escapeHtml(record.reviewerRemarks)}</p>` : ""}
+        <div id="academicFormMessage" class="message hidden" role="status"></div>
+        <div class="modal-actions">
+          <button class="secondary-button close-academic-modal" type="button">Cancel</button>
+          <button class="primary-button" type="submit">${record ? "Save and Resubmit" : "Submit DLL"}</button>
+        </div>
+      </form>
+    </div>
+  `);
+  const syncSubmissionFields = () => {
+    const type = document.querySelector("#lessonPlanSubmissionType")?.value || "";
     const fileField = document.querySelector("#lessonPlanFileField");
-    fileField.classList.toggle("hidden", type !== "Soft Copy");
-    document.querySelector("#lessonPlanFileLink").required = type === "Soft Copy";
+    const submittedToField = document.querySelector("#lessonPlanSubmittedToField");
+    fileField?.classList.toggle("hidden", type !== "Soft Copy");
+    submittedToField?.classList.toggle("hidden", type !== "Hard Copy");
+    const link = document.querySelector("#lessonPlanFileLink");
+    const submittedTo = document.querySelector("#lessonPlanSubmittedTo");
+    if (link) link.required = type === "Soft Copy";
+    if (submittedTo) submittedTo.required = type === "Hard Copy";
   };
-  document.querySelector("#lessonPlanSubmissionType").addEventListener("input", syncFileLink);
-  const syncWeekOptions = () => {
-    const selectedTerm = document.querySelector("#lessonPlanTerm").value;
-    const selectedWeek = Number(record?.weekNumber || 0);
-    const options = lessonPlanWeekOptions
-      .filter((item) => activeLessonPlanWeeks().includes(item.key) && item.term === selectedTerm)
-      .map((item) => `<option value="${item.weekNumber}" ${item.weekNumber === selectedWeek ? "selected" : ""}>Week ${item.weekNumber}</option>`)
-      .join("");
-    document.querySelector("#lessonPlanWeekNumber").innerHTML = options || `<option value="">No visible weeks</option>`;
-  };
-  document.querySelector("#lessonPlanTerm").addEventListener("input", syncWeekOptions);
-  syncFileLink();
-  syncWeekOptions();
+  document.querySelector("#lessonPlanSubmissionType")?.addEventListener("input", syncSubmissionFields);
+  syncSubmissionFields();
 }
 
 async function handleLessonPlanFormSubmit(event) {
   event.preventDefault();
   const message = document.querySelector("#academicFormMessage");
-  const workload = teacherWorkloadRecordsCache.find((item) => item.id === document.querySelector("#lessonPlanWorkloadId").value);
-  const weekStart = document.querySelector("#lessonPlanWeekStart").value;
-  const term = document.querySelector("#lessonPlanTerm").value;
-  const weekNumber = Number(document.querySelector("#lessonPlanWeekNumber").value || 0);
-  const submissionType = document.querySelector("#lessonPlanSubmissionType").value;
-  const fileLink = document.querySelector("#lessonPlanFileLink").value.trim();
-  if (!workload || !canSubmitLessonPlanForWorkload(workload)) {
-    message.textContent = "Select one of your assigned classes.";
+  const submitButton = event.submitter || event.target.querySelector("button[type='submit']");
+  if (submitButton?.disabled) return;
+  const requestRecord = dllRequestRecordsCache.find((item) => item.id === event.target.dataset.requestId);
+  const workload = teacherWorkloadRecordsCache.find((item) => item.id === event.target.dataset.workloadId);
+  const existing = requestRecord && workload ? findLessonPlanRecord(requestRecord.id, workload.id, auth.currentUser.uid) : null;
+  const submissionType = document.querySelector("#lessonPlanSubmissionType")?.value || "";
+  const fileLink = document.querySelector("#lessonPlanFileLink")?.value.trim() || "";
+  const submittedTo = document.querySelector("#lessonPlanSubmittedTo")?.value.trim() || "";
+  if (!requestRecord || requestRecord.status !== "Active") {
+    message.textContent = "This DLL request is no longer active.";
     message.classList.add("error");
     message.classList.remove("hidden");
     return;
   }
-  if (!activeLessonPlanWeeks().includes(`${term}:Week ${weekNumber}`)) {
-    message.textContent = "Select a visible term and week for this lesson plan.";
+  if (!workload || !canSubmitLessonPlanForWorkload(workload) || workloadSchoolYear(workload) !== requestRecord.schoolYear) {
+    message.textContent = "Select one of your valid teaching workload records for this school year.";
     message.classList.add("error");
     message.classList.remove("hidden");
     return;
   }
-  if (submissionType === "Soft Copy" && !fileLink) {
-    message.textContent = "Soft Copy submissions require a DLL link.";
+  if (!submissionTypes.includes(submissionType)) {
+    message.textContent = "Select a submission type.";
     message.classList.add("error");
     message.classList.remove("hidden");
     return;
   }
-  if (fileLink && !isValidUrl(fileLink)) {
-    message.textContent = "Enter a valid http or https DLL link.";
+  if (submissionType === "Soft Copy" && (!fileLink || !isValidUrl(fileLink))) {
+    message.textContent = "Soft Copy submissions require a valid http or https share link.";
     message.classList.add("error");
     message.classList.remove("hidden");
     return;
   }
+  if (submissionType === "Hard Copy" && !submittedTo) {
+    message.textContent = "Hard Copy submissions require the receiving person or office.";
+    message.classList.add("error");
+    message.classList.remove("hidden");
+    return;
+  }
+  const normalizedFileLink = submissionType === "Soft Copy" ? new URL(fileLink).toString() : "";
   const section = getSelectedClass(workload.sectionId);
-  const existing = findLessonPlanRecord(workload.id, term, weekNumber);
   const data = {
+    requestId: requestRecord.id,
+    requestTitle: requestRecord.title || "Weekly DLL Submission",
     workloadId: workload.id,
-    teacherId: workload.teacherId,
+    teacherId: auth.currentUser.uid,
     teacherName: workload.teacherName || currentUserProfile.fullName || auth.currentUser.email,
-    teacherRole: currentUserProfile.role,
+    teacherRole: lessonPlanSubmitterRole(currentUserProfile),
+    subjectId: workload.subjectId || "",
     subjectName: workload.subjectName || "",
     subjectArea: workload.subjectArea || "",
     sectionId: workload.sectionId || "",
-    sectionName: workload.sectionName || "",
+    sectionName: workload.sectionName || section?.sectionName || "",
     gradeLevel: workload.gradeLevel || section?.gradeLevel || "",
-    schoolYear: section?.schoolYear || "",
-    term,
-    weekNumber,
-    weekStart,
+    schoolYear: requestRecord.schoolYear,
+    term: requestRecord.term,
+    weekLabel: requestRecord.weekLabel,
+    weekStart: requestRecord.weekStart,
+    weekEnd: requestRecord.weekEnd,
+    dueDate: requestRecord.dueDate,
     submissionType,
-    fileLink: submissionType === "Soft Copy" ? fileLink : "",
-    teacherRemarks: document.querySelector("#lessonPlanTeacherRemarks").value.trim(),
+    fileLink: normalizedFileLink,
+    submittedTo: submissionType === "Hard Copy" ? submittedTo : "",
+    teacherRemarks: document.querySelector("#lessonPlanTeacherRemarks")?.value.trim() || "",
     status: "Submitted",
     submittedAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   };
+  if (submitButton) submitButton.disabled = true;
   try {
-    let lessonPlanId = existing?.id || "";
+    let lessonPlanId = existing?.id || lessonPlanDocumentId(requestRecord.id, workload.id, auth.currentUser.uid);
     if (existing) {
-      await updateDoc(doc(db, "lessonPlans", existing.id), { ...data, createdAt: existing.createdAt });
+      await updateDoc(doc(db, "lessonPlans", existing.id), data);
       await createAuditLog("update", "Lesson Plans", existing.id, existing, data);
     } else {
-      const created = await addDoc(collection(db, "lessonPlans"), { ...data, createdAt: serverTimestamp() });
-      lessonPlanId = created.id;
-      await createAuditLog("create", "Lesson Plans", created.id, null, data);
+      const createData = {
+        ...data,
+        createdByUid: auth.currentUser.uid,
+        createdByName: currentUserProfile.fullName || auth.currentUser.email,
+        createdAt: serverTimestamp(),
+      };
+      await setDoc(doc(db, "lessonPlans", lessonPlanId), createData);
+      await createAuditLog("create", "Lesson Plans", lessonPlanId, null, createData);
     }
-    await createRoleNotifications(["Principal", "Master Teacher", "Head Teacher"].filter((role) => role !== currentUserProfile.role), {
-      notificationType: "lesson_plan_submitted",
-      title: "Lesson plan submitted",
-      message: `${data.teacherName} submitted ${subjectGradeSectionClassLabel(data)}.`,
-      relatedModule: "Lesson Plans",
-      relatedRecordId: lessonPlanId,
-      actionUrl: "#Lesson Plans",
-    });
+    await notifyDllReviewers({ ...data, id: lessonPlanId }, Boolean(existing));
     document.querySelector("#academicModal")?.remove();
     await renderLessonPlanModule();
-    showDashboardMessage("Lesson plan submitted.");
+    showDashboardMessage(existing ? "DLL resubmitted." : "DLL submitted.");
   } catch (error) {
     message.textContent = `Save failed: ${error.message}`;
     message.classList.add("error");
     message.classList.remove("hidden");
+    if (submitButton) submitButton.disabled = false;
   }
 }
 
 function openLessonPlanReviewForm(record) {
+  const requestRecord = dllRequestRecordsCache.find((item) => item.id === record.requestId);
+  if (!requestRecord || !canReviewLessonPlan()) return;
   els.dashboardContent.insertAdjacentHTML("beforeend", `
     <div id="academicModal" class="modal-backdrop">
       <form id="lessonPlanReviewForm" class="modal" data-id="${escapeHtml(record.id)}">
@@ -8164,6 +8633,7 @@ function openLessonPlanReviewForm(record) {
           <button class="icon-button close-academic-modal" type="button" aria-label="Close">x</button>
         </div>
         <p class="review-summary">
+          ${escapeHtml(requestRecord.title || record.requestTitle || "DLL Request")} · ${escapeHtml(requestRecord.weekLabel || record.weekLabel || "")}<br />
           ${escapeHtml(subjectGradeSectionClassLabel(record))}<br />
           <span>${escapeHtml(record.submissionType || "Submission")} ${record.fileLink ? "- link provided" : "- hard copy / no link"}</span>
         </p>
@@ -8184,10 +8654,14 @@ async function handleLessonPlanReviewSubmit(event) {
   event.preventDefault();
   const message = document.querySelector("#academicFormMessage");
   const record = lessonPlanRecordsCache.find((item) => item.id === event.target.dataset.id);
-  if (!record || !canReviewLessonPlan()) return;
+  const requestRecord = dllRequestRecordsCache.find((item) => item.id === record?.requestId);
+  const submitButton = event.submitter || event.target.querySelector("button[type='submit']");
+  if (!record || !requestRecord || !canReviewLessonPlan() || submitButton?.disabled) return;
+  const nextStatus = document.querySelector("#lessonPlanReviewStatus").value;
+  if (submitButton) submitButton.disabled = true;
   try {
     await updateDoc(doc(db, "lessonPlans", record.id), {
-      status: document.querySelector("#lessonPlanReviewStatus").value,
+      status: nextStatus,
       reviewTag: document.querySelector("#lessonPlanReviewTag").value,
       reviewerRemarks: document.querySelector("#lessonPlanReviewerRemarks").value.trim(),
       reviewedByUid: auth.currentUser.uid,
@@ -8196,18 +8670,24 @@ async function handleLessonPlanReviewSubmit(event) {
       reviewedAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });
-    await createAuditLog("update", "Lesson Plans", record.id, record, { status: document.querySelector("#lessonPlanReviewStatus").value });
-    await createNotification({
-      recipientUid: record.teacherId,
-      recipientName: record.teacherName,
-      recipientRole: record.teacherRole || "Teacher",
-      notificationType: "lesson_plan_reviewed",
-      title: "Lesson plan reviewed",
-      message: `${subjectGradeSectionClassLabel(record)} was ${document.querySelector("#lessonPlanReviewStatus").value}.`,
-      relatedModule: "Lesson Plans",
-      relatedRecordId: record.id,
-      actionUrl: "#Lesson Plans",
-    });
+    await createAuditLog("update", "Lesson Plans", record.id, record, { status: nextStatus });
+    if (record.teacherId !== auth.currentUser.uid) {
+      const teacher = academicTeachersCache.find((user) => (user.uid || user.id) === record.teacherId)
+        || { uid: record.teacherId, fullName: record.teacherName, role: record.teacherRole || "Teacher" };
+      const notificationType = nextStatus === "Returned for Revision"
+        ? "lesson_plan_returned"
+        : nextStatus === "Noted"
+          ? "lesson_plan_noted"
+          : "lesson_plan_confirmed";
+      await createDirectNotification(teacher, {
+        notificationType,
+        title: nextStatus === "Returned for Revision" ? "DLL returned for revision" : `DLL ${nextStatus.toLowerCase()}`,
+        message: `${subjectGradeSectionClassLabel(record)} for ${requestRecord.weekLabel || "the DLL request"} was ${nextStatus}.`,
+        relatedModule: "Lesson Plans",
+        relatedRecordId: record.id,
+        actionUrl: "#Lesson Plans",
+      });
+    }
     document.querySelector("#academicModal")?.remove();
     await renderLessonPlanModule();
     showDashboardMessage("Lesson plan review saved.");
@@ -8215,6 +8695,7 @@ async function handleLessonPlanReviewSubmit(event) {
     message.textContent = `Review failed: ${error.message}`;
     message.classList.add("error");
     message.classList.remove("hidden");
+    if (submitButton) submitButton.disabled = false;
   }
 }
 
@@ -9192,14 +9673,47 @@ function handleAcademicAction(event) {
     if (workload) openGradeSubmissionForm(workload);
     return;
   }
-  if (event.target.closest("#newLessonPlanButton")) {
-    openLessonPlanForm();
+  if (event.target.closest("#newDllRequestButton")) {
+    openDllRequestForm();
+    return;
+  }
+  const viewDllCompliance = event.target.closest(".view-dll-compliance");
+  if (viewDllCompliance) {
+    selectedDllRequestId = viewDllCompliance.dataset.id || "";
+    populateDllComplianceRequestSelect();
+    applyLessonPlanFilters();
+    document.querySelector(".dll-compliance-panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    return;
+  }
+  const editDllRequest = event.target.closest(".edit-dll-request");
+  if (editDllRequest) {
+    const requestRecord = dllRequestRecordsCache.find((item) => item.id === editDllRequest.dataset.id);
+    if (requestRecord && canManageDllRequest(requestRecord)) openDllRequestForm(requestRecord);
+    return;
+  }
+  const toggleDllRequest = event.target.closest(".toggle-dll-request-status");
+  if (toggleDllRequest) {
+    const nextStatus = toggleDllRequest.dataset.status || "";
+    const verb = nextStatus === "Closed" ? "close" : "reopen";
+    if (confirm(`Are you sure you want to ${verb} this DLL request?`)) {
+      updateDllRequestStatus(toggleDllRequest.dataset.id, nextStatus, toggleDllRequest);
+    }
+    return;
+  }
+  const submitRequestDll = event.target.closest(".submit-request-dll");
+  if (submitRequestDll) {
+    const requestRecord = dllRequestRecordsCache.find((item) => item.id === submitRequestDll.dataset.requestId);
+    const workload = teacherWorkloadRecordsCache.find((item) => item.id === submitRequestDll.dataset.workloadId);
+    const record = requestRecord && workload ? findLessonPlanRecord(requestRecord.id, workload.id, auth.currentUser.uid) : null;
+    if (requestRecord && workload) openLessonPlanForm(requestRecord, workload, record);
     return;
   }
   const editLessonPlan = event.target.closest(".edit-lesson-plan");
   if (editLessonPlan) {
     const record = lessonPlanRecordsCache.find((item) => item.id === editLessonPlan.dataset.id);
-    if (record) openLessonPlanForm(record);
+    const requestRecord = dllRequestRecordsCache.find((item) => item.id === record?.requestId);
+    const workload = teacherWorkloadRecordsCache.find((item) => item.id === record?.workloadId);
+    if (record && requestRecord && workload) openLessonPlanForm(requestRecord, workload, record);
     return;
   }
   const reviewLessonPlan = event.target.closest(".review-lesson-plan");
@@ -14733,7 +15247,11 @@ function bindEvents() {
     if (["gradeTrackerSearch", "gradeSchoolYearFilter", "gradeTermFilter", "gradeLevelFilter", "gradeSectionFilter", "gradeSubjectFilter", "gradeTeacherFilter", "gradeStatusFilter"].includes(event.target.id)) {
       applyGradeTrackerFilters();
     }
-    if (["lessonPlanSearch", "lessonPlanStatusFilter", "lessonPlanTypeFilter"].includes(event.target.id)) {
+    if (["lessonPlanSearch", "lessonPlanStatusFilter", "lessonPlanTypeFilter", "dllRequestSearch", "dllRequestSchoolYearFilter", "dllRequestTermFilter", "dllRequestStatusFilter"].includes(event.target.id)) {
+      applyLessonPlanFilters();
+    }
+    if (event.target.id === "dllComplianceRequestSelect") {
+      selectedDllRequestId = event.target.value || "";
       applyLessonPlanFilters();
     }
     if (["inventorySearch", "inventoryCategoryFilter", "inventoryConditionFilter", "inventoryStatusFilter", "inventoryLocationFilter"].includes(event.target.id)) {
@@ -14938,6 +15456,10 @@ function bindEvents() {
 
     if (event.target.id === "lessonPlanForm") {
       handleLessonPlanFormSubmit(event);
+    }
+
+    if (event.target.id === "dllRequestForm") {
+      handleDllRequestFormSubmit(event);
     }
 
     if (event.target.id === "lessonPlanReviewForm") {

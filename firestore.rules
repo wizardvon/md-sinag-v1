@@ -176,7 +176,6 @@ service cloud.firestore {
 
     function validReportAssignmentType(reportType) {
       return reportType in [
-        "DLL / Lesson Plan",
         "Exam / Test Questions",
         "Table of Specifications (TOS)",
         "Accomplishment Report",
@@ -1408,8 +1407,13 @@ service cloud.firestore {
         "transfer_record_added",
         "dropout_record_added",
         "document_uploaded",
+        "dll_request_created",
+        "dll_request_status_changed",
         "lesson_plan_submitted",
-        "lesson_plan_reviewed",
+        "lesson_plan_resubmitted",
+        "lesson_plan_returned",
+        "lesson_plan_noted",
+        "lesson_plan_confirmed",
         "pending_user_approval",
         "user_approved",
         "reminder_due_today",
@@ -1928,45 +1932,260 @@ service cloud.firestore {
         && request.resource.data.updatedAt is timestamp;
     }
 
-    function validLessonPlanSubmit() {
-      return isTeacherWorkloadViewer()
-        && hasAnyCurrentRole(["Teacher", "Master Teacher", "Head Teacher"])
-        && request.resource.data.workloadId is string
-        && get(/databases/$(database)/documents/teacherWorkloads/$(request.resource.data.workloadId)).data.teacherId == request.auth.uid
-        && request.resource.data.teacherId == request.auth.uid
-        && request.resource.data.teacherName is string
-        && request.resource.data.teacherRole in ["Teacher", "Master Teacher", "Head Teacher"]
-        && request.resource.data.subjectName is string
-        && request.resource.data.subjectArea is string
-        && request.resource.data.sectionId is string
-        && request.resource.data.sectionName is string
-        && request.resource.data.gradeLevel is string
+    function isDllRequestManager() {
+      return signedIn()
+        && userDoc(request.auth.uid).data.status == "approved"
+        && hasAnyCurrentRole(["Principal", "Master Teacher", "Head Teacher"]);
+    }
+
+    function validDllRequestValues() {
+      return request.resource.data.keys().hasOnly([
+          "title",
+          "schoolYear",
+          "term",
+          "weekLabel",
+          "weekStart",
+          "weekEnd",
+          "dueDate",
+          "instructions",
+          "status",
+          "createdByUid",
+          "createdByName",
+          "createdByRole",
+          "createdAt",
+          "updatedAt"
+        ])
+        && request.resource.data.title is string
+        && request.resource.data.title.size() > 0
         && request.resource.data.schoolYear is string
+        && request.resource.data.schoolYear.size() > 0
         && validAssessmentTerm(request.resource.data.term)
-        && request.resource.data.weekNumber is number
-        && request.resource.data.weekNumber >= 1
-        && request.resource.data.weekNumber <= 10
+        && request.resource.data.weekLabel is string
+        && request.resource.data.weekLabel.size() > 0
         && request.resource.data.weekStart is string
-        && request.resource.data.submissionType in ["Hard Copy", "Soft Copy"]
-        && request.resource.data.fileLink is string
-        && request.resource.data.teacherRemarks is string
-        && request.resource.data.status == "Submitted"
-        && request.resource.data.submittedAt is timestamp
+        && request.resource.data.weekStart.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+        && request.resource.data.weekEnd is string
+        && request.resource.data.weekEnd.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+        && request.resource.data.weekEnd >= request.resource.data.weekStart
+        && request.resource.data.dueDate is string
+        && request.resource.data.dueDate.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+        && request.resource.data.dueDate >= request.resource.data.weekStart
+        && request.resource.data.instructions is string
+        && request.resource.data.instructions.size() > 0
+        && request.resource.data.status in ["Active", "Closed"]
+        && request.resource.data.createdByUid is string
+        && request.resource.data.createdByUid.size() > 0
+        && request.resource.data.createdByName is string
+        && request.resource.data.createdByName.size() > 0
+        && validRole(request.resource.data.createdByRole)
+        && request.resource.data.createdAt is timestamp
         && request.resource.data.updatedAt is timestamp;
     }
 
+    function validDllRequestCreate() {
+      return isDllRequestManager()
+        && validDllRequestValues()
+        && request.resource.data.createdByUid == request.auth.uid
+        && request.resource.data.createdByRole in currentRoles();
+    }
+
+    function validDllRequestUpdate() {
+      return isDllRequestManager()
+        && validDllRequestValues()
+        && (
+          hasCurrentRole("Principal")
+          || resource.data.createdByUid == request.auth.uid
+        )
+        && request.resource.data.createdByUid == resource.data.createdByUid
+        && request.resource.data.createdByName == resource.data.createdByName
+        && request.resource.data.createdByRole == resource.data.createdByRole
+        && request.resource.data.createdAt == resource.data.createdAt;
+    }
+
+    function validLessonPlanFields() {
+      return request.resource.data.keys().hasOnly([
+          "requestId",
+          "requestTitle",
+          "workloadId",
+          "teacherId",
+          "teacherName",
+          "teacherRole",
+          "subjectId",
+          "subjectName",
+          "subjectArea",
+          "sectionId",
+          "sectionName",
+          "gradeLevel",
+          "schoolYear",
+          "term",
+          "weekLabel",
+          "weekStart",
+          "weekEnd",
+          "dueDate",
+          "submissionType",
+          "fileLink",
+          "submittedTo",
+          "teacherRemarks",
+          "status",
+          "submittedAt",
+          "reviewTag",
+          "reviewerRemarks",
+          "reviewedByUid",
+          "reviewedByName",
+          "reviewedByRole",
+          "reviewedAt",
+          "createdByUid",
+          "createdByName",
+          "createdAt",
+          "updatedAt"
+        ]);
+    }
+
+    function validLessonPlanSubmissionValues() {
+      return isTeacherWorkloadViewer()
+        && hasAnyCurrentRole(["Teacher", "Master Teacher", "Head Teacher"])
+        && validLessonPlanFields()
+        && request.resource.data.requestId is string
+        && request.resource.data.requestId.size() > 0
+        && exists(/databases/$(database)/documents/dllRequests/$(request.resource.data.requestId))
+        && get(/databases/$(database)/documents/dllRequests/$(request.resource.data.requestId)).data.status == "Active"
+        && request.resource.data.requestTitle == get(/databases/$(database)/documents/dllRequests/$(request.resource.data.requestId)).data.title
+        && request.resource.data.schoolYear == get(/databases/$(database)/documents/dllRequests/$(request.resource.data.requestId)).data.schoolYear
+        && request.resource.data.term == get(/databases/$(database)/documents/dllRequests/$(request.resource.data.requestId)).data.term
+        && request.resource.data.weekLabel == get(/databases/$(database)/documents/dllRequests/$(request.resource.data.requestId)).data.weekLabel
+        && request.resource.data.weekStart == get(/databases/$(database)/documents/dllRequests/$(request.resource.data.requestId)).data.weekStart
+        && request.resource.data.weekEnd == get(/databases/$(database)/documents/dllRequests/$(request.resource.data.requestId)).data.weekEnd
+        && request.resource.data.dueDate == get(/databases/$(database)/documents/dllRequests/$(request.resource.data.requestId)).data.dueDate
+        && request.resource.data.workloadId is string
+        && request.resource.data.workloadId.size() > 0
+        && exists(/databases/$(database)/documents/teacherWorkloads/$(request.resource.data.workloadId))
+        && get(/databases/$(database)/documents/teacherWorkloads/$(request.resource.data.workloadId)).data.teacherId == request.auth.uid
+        && request.resource.data.teacherId == request.auth.uid
+        && request.resource.data.teacherName is string
+        && request.resource.data.teacherName.size() > 0
+        && request.resource.data.teacherRole in currentRoles()
+        && request.resource.data.teacherRole in ["Teacher", "Master Teacher", "Head Teacher"]
+        && request.resource.data.subjectId == get(/databases/$(database)/documents/teacherWorkloads/$(request.resource.data.workloadId)).data.subjectId
+        && request.resource.data.subjectName == get(/databases/$(database)/documents/teacherWorkloads/$(request.resource.data.workloadId)).data.subjectName
+        && request.resource.data.subjectArea == get(/databases/$(database)/documents/teacherWorkloads/$(request.resource.data.workloadId)).data.subjectArea
+        && request.resource.data.sectionId == get(/databases/$(database)/documents/teacherWorkloads/$(request.resource.data.workloadId)).data.sectionId
+        && request.resource.data.sectionName == get(/databases/$(database)/documents/teacherWorkloads/$(request.resource.data.workloadId)).data.sectionName
+        && request.resource.data.gradeLevel == get(/databases/$(database)/documents/teacherWorkloads/$(request.resource.data.workloadId)).data.gradeLevel
+        && (
+          (
+            "schoolYear" in get(/databases/$(database)/documents/teacherWorkloads/$(request.resource.data.workloadId)).data
+            && request.resource.data.schoolYear == get(/databases/$(database)/documents/teacherWorkloads/$(request.resource.data.workloadId)).data.schoolYear
+          )
+          || (
+            exists(/databases/$(database)/documents/classes/$(request.resource.data.sectionId))
+            && request.resource.data.schoolYear == get(/databases/$(database)/documents/classes/$(request.resource.data.sectionId)).data.schoolYear
+          )
+        )
+        && request.resource.data.submissionType in ["Hard Copy", "Soft Copy"]
+        && request.resource.data.fileLink is string
+        && request.resource.data.submittedTo is string
+        && (
+          (
+            request.resource.data.submissionType == "Soft Copy"
+            && request.resource.data.fileLink.matches('^https?://.+')
+            && request.resource.data.submittedTo == ""
+          )
+          || (
+            request.resource.data.submissionType == "Hard Copy"
+            && request.resource.data.fileLink == ""
+            && request.resource.data.submittedTo.size() > 0
+          )
+        )
+        && request.resource.data.teacherRemarks is string
+        && request.resource.data.status == "Submitted"
+        && request.resource.data.submittedAt is timestamp
+        && request.resource.data.createdByUid == request.auth.uid
+        && request.resource.data.createdByName is string
+        && request.resource.data.createdByName.size() > 0
+        && request.resource.data.createdAt is timestamp
+        && request.resource.data.updatedAt is timestamp;
+    }
+
+    function validLessonPlanCreate(recordId) {
+      return validLessonPlanSubmissionValues()
+        && recordId == request.resource.data.requestId + "__" + request.resource.data.workloadId + "__" + request.auth.uid
+        && !request.resource.data.keys().hasAny([
+          "reviewTag",
+          "reviewerRemarks",
+          "reviewedByUid",
+          "reviewedByName",
+          "reviewedByRole",
+          "reviewedAt"
+        ]);
+    }
+
     function validLessonPlanOwnerUpdate() {
-      return validLessonPlanSubmit()
-        && request.resource.data.createdAt == resource.data.createdAt
+      return validLessonPlanSubmissionValues()
+        && resource.data.requestId is string
+        && resource.data.teacherId == request.auth.uid
+        && resource.data.status in ["Submitted", "Returned for Revision"]
+        && request.resource.data.requestId == resource.data.requestId
         && request.resource.data.workloadId == resource.data.workloadId
         && request.resource.data.teacherId == resource.data.teacherId
-        && request.resource.data.weekStart == resource.data.weekStart;
+        && request.resource.data.teacherName == resource.data.teacherName
+        && request.resource.data.teacherRole == resource.data.teacherRole
+        && request.resource.data.createdByUid == resource.data.createdByUid
+        && request.resource.data.createdByName == resource.data.createdByName
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          "requestTitle",
+          "subjectId",
+          "subjectName",
+          "subjectArea",
+          "sectionId",
+          "sectionName",
+          "gradeLevel",
+          "schoolYear",
+          "term",
+          "weekLabel",
+          "weekStart",
+          "weekEnd",
+          "dueDate",
+          "submissionType",
+          "fileLink",
+          "submittedTo",
+          "teacherRemarks",
+          "status",
+          "submittedAt",
+          "updatedAt"
+        ]);
     }
 
     function validLessonPlanReviewUpdate() {
       return signedIn()
         && userDoc(request.auth.uid).data.status == "approved"
         && hasAnyCurrentRole(["Principal", "Master Teacher", "Head Teacher"])
+        && resource.data.requestId is string
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          "status",
+          "reviewTag",
+          "reviewerRemarks",
+          "reviewedByUid",
+          "reviewedByName",
+          "reviewedByRole",
+          "reviewedAt",
+          "updatedAt"
+        ])
+        && request.resource.data.status in ["Noted", "Confirmed", "Returned for Revision"]
+        && request.resource.data.reviewTag is string
+        && request.resource.data.reviewerRemarks is string
+        && request.resource.data.reviewedByUid == request.auth.uid
+        && request.resource.data.reviewedByName is string
+        && request.resource.data.reviewedByRole in currentRoles()
+        && request.resource.data.reviewedAt is timestamp
+        && request.resource.data.updatedAt is timestamp;
+    }
+
+    function validLegacyLessonPlanReviewUpdate() {
+      return signedIn()
+        && userDoc(request.auth.uid).data.status == "approved"
+        && hasAnyCurrentRole(["Principal", "Master Teacher", "Head Teacher"])
+        && !("requestId" in resource.data)
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
           "status",
           "reviewTag",
@@ -2066,8 +2285,10 @@ service cloud.firestore {
         && request.resource.data.gradeTerms.hasOnly(["Term 1", "Term 2", "Term 3"])
         && request.resource.data.assessmentScopes is list
         && request.resource.data.assessmentScopes.size() > 0
-        && request.resource.data.lessonPlanWeeks is list
-        && request.resource.data.lessonPlanWeeks.size() > 0
+        && (
+          !request.resource.data.keys().hasAny(["lessonPlanWeeks"])
+          || request.resource.data.lessonPlanWeeks is list
+        )
         && request.resource.data.updatedByUid == request.auth.uid
         && request.resource.data.updatedAt is timestamp;
     }
@@ -2273,15 +2494,23 @@ service cloud.firestore {
       allow delete: if isApprovedPrincipal();
     }
 
+    match /dllRequests/{recordId} {
+      allow create: if validDllRequestCreate();
+      allow read: if isTeacherWorkloadViewer();
+      allow update: if validDllRequestUpdate();
+      allow delete: if isApprovedPrincipal();
+    }
+
     match /lessonPlans/{recordId} {
-      allow create: if validLessonPlanSubmit()
-        && request.resource.data.createdAt is timestamp;
+      allow create: if validLessonPlanCreate(recordId);
       allow read: if isTeacherWorkloadViewer()
         && (
           hasAnyCurrentRole(["Principal", "Master Teacher", "Head Teacher"])
           || resource.data.teacherId == request.auth.uid
         );
-      allow update: if validLessonPlanOwnerUpdate() || validLessonPlanReviewUpdate();
+      allow update: if validLessonPlanOwnerUpdate()
+        || validLessonPlanReviewUpdate()
+        || validLegacyLessonPlanReviewUpdate();
       allow delete: if isApprovedPrincipal();
     }
 

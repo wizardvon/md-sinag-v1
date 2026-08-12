@@ -1,12 +1,12 @@
-const CACHE_VERSION = "v24";
+const CACHE_VERSION = "v25-dll-requests";
 const CACHE_NAME = `sinag-cache-${CACHE_VERSION}`;
 
 const APP_SHELL_ASSETS = [
   "./",
   "./index.html",
-  "./styles.css?v=20260629-roles",
-  "./app.js?v=20260714-user-profile-recovery",
-  "./constants.js?v=20260524-2",
+  "./styles.css?v=20260811-dll-requests",
+  "./app.js?v=20260811-dll-requests",
+  "./constants.js?v=20260811-dll-requests",
   "./firebase-config.js?v=20260523-2",
   "./manifest.json",
   "./assets/sinag_logo.png",

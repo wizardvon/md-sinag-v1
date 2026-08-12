@@ -3447,6 +3447,167 @@ tbody tr:hover td {
   box-shadow: var(--shadow-lg);
 }
 
+.dll-requirement-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px;
+  padding: 18px;
+}
+
+.dll-requirement-card {
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+  background: var(--white);
+  border: 1px solid var(--gray-200);
+  border-left: 4px solid var(--blue-600);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
+}
+
+.dll-requirement-card.needs-revision {
+  border-left-color: var(--red);
+  background: #fffaf7;
+}
+
+.dll-card-heading,
+.dll-selected-request-summary,
+.dll-compliance-section .section-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.dll-card-heading h3,
+.dll-compliance-section h3 {
+  margin: 2px 0 0;
+  color: var(--navy-950);
+}
+
+.dll-request-details {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+}
+
+.dll-request-details div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.dll-request-details dt {
+  color: var(--gray-500);
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.dll-request-details dd {
+  margin: 0;
+  color: var(--gray-900);
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.dll-instructions,
+.dll-review-remarks,
+.dll-form-context {
+  margin: 0;
+  padding: 12px;
+  line-height: 1.55;
+  background: var(--gray-50);
+  border: 1px solid var(--gray-200);
+  border-radius: var(--radius);
+}
+
+.dll-review-remarks {
+  color: #8a3418;
+  background: #fff7ed;
+  border-color: #fed7aa;
+}
+
+.dll-form-context {
+  display: grid;
+  gap: 5px;
+  margin-bottom: 14px;
+}
+
+.dll-form-context strong {
+  color: var(--navy-950);
+  font-size: 1.05rem;
+}
+
+.dll-form-context span,
+.dll-form-context small {
+  color: var(--gray-600);
+}
+
+.dll-form-context p {
+  margin: 6px 0 0;
+}
+
+.dll-selected-request-summary {
+  margin: 0 18px 16px;
+  padding: 14px;
+  background: var(--gray-50);
+  border: 1px solid var(--gray-200);
+  border-radius: var(--radius);
+}
+
+.dll-selected-request-summary div {
+  display: grid;
+  gap: 3px;
+}
+
+.dll-selected-request-summary strong {
+  color: var(--navy-950);
+}
+
+.dll-selected-request-summary span:not(.badge) {
+  color: var(--gray-500);
+  font-size: 0.88rem;
+}
+
+.dll-compliance-sections {
+  display: grid;
+  gap: 16px;
+  padding: 18px;
+}
+
+.dll-compliance-section {
+  overflow: hidden;
+  border: 1px solid var(--gray-200);
+  border-radius: var(--radius);
+}
+
+.dll-compliance-section .section-header {
+  padding: 12px 14px;
+  background: var(--gray-50);
+  border-bottom: 1px solid var(--gray-200);
+}
+
+.dll-compliance-section .empty-state {
+  margin: 0;
+}
+
+.inline-filter {
+  display: grid;
+  gap: 6px;
+  min-width: min(420px, 100%);
+}
+
+.dll-request-table .selected-row td {
+  background: #f0f7ff;
+}
+
+.legacy-dll-panel > .helper-text {
+  margin: 0 18px 14px;
+}
+
 @media (max-width: 1100px) {
   .card-grid {
     grid-template-columns: repeat(3, minmax(160px, 1fr));
@@ -3819,6 +3980,30 @@ tbody tr:hover td {
 @page {
   size: A4 portrait;
   margin: 12mm;
+}
+
+@media (max-width: 560px) {
+  .dll-requirement-grid,
+  .dll-compliance-sections {
+    grid-template-columns: 1fr;
+    padding: 12px;
+  }
+
+  .dll-request-details {
+    grid-template-columns: 1fr;
+  }
+
+  .dll-card-heading,
+  .dll-selected-request-summary,
+  .dll-compliance-section .section-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .inline-filter {
+    width: 100%;
+    min-width: 0;
+  }
 }
 
 @media print {

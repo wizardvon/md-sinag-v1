@@ -13,6 +13,7 @@ Project SINAG means **School Integrated Network for Analytics and Governance**. 
 - Enrollment and student registry with SF1 import and learner status tracking
 - Link-based Document Repository
 - Financial Report module with manual records, Excel/CSV import preview, summaries, filters, exports, and print-ready reporting
+- Centralized DLL request workflow with request-based teacher submissions, workload compliance, reviews, notifications, audit logs, and legacy DLL visibility
 - Notifications and recent activity feed
 - Dashboard cards connected to Firestore data where the role has access
 - Dashboard Most Urgent Task card with monthly task/activity calendar
@@ -64,20 +65,47 @@ If the Principal login shows `auth/invalid-credential`, Firebase Authentication 
 - `documents`
 - `financialReports`
 - `ppaMonitoring`
+- `classes`
+- `students`
+- `teacherWorkloads`
+- `gradeSubmissions`
+- `dllRequests`
+- `lessonPlans`
 - `notifications`
+- `auditLogs`
+
+### DLL Requests and Lesson Plans
+
+The `dllRequests` collection is the source of current DLL requirements. A Principal, Master Teacher, or Head Teacher creates one request for a school year, term, and week; the request automatically applies to every matching teaching workload. Request documents use these fields:
+
+- `title`, `schoolYear`, `term`, `weekLabel`
+- `weekStart`, `weekEnd`, `dueDate`, `instructions`, `status`
+- `createdByUid`, `createdByName`, `createdByRole`, `createdAt`, `updatedAt`
+
+New `lessonPlans` documents include `requestId` and use one deterministic record per `requestId + workloadId + teacherId`. Soft copies use HTTP/HTTPS share links only. Hard copies store the required receiving person or office in `submittedTo`. Request-linked submissions preserve the existing `Submitted`, `Noted`, `Confirmed`, and `Returned for Revision` review workflow.
+
+Lesson-plan documents without `requestId` are treated as legacy records. They remain visible in the Lesson Plans module but do not affect current compliance, dashboard counters, urgent tasks, or DLL exports. The legacy `systemSettings/taskVisibility.lessonPlanWeeks` field may remain in Firestore, but the application no longer uses it to create DLL requirements.
 
 ## Local Development
 
 Run the static app from a local server because it uses JavaScript modules and a service worker:
 
 ```bash
-python -m http.server 8000
+npm run dev
 ```
 
-Then open:
+The server starts at `http://localhost:8000/` and prints that URL in the terminal. Keep the terminal open while testing. If SINAG is already running on port 8000, the command reports the existing URL instead of starting a duplicate server. If another application owns the port, choose a different one:
+
+```bash
+npm run dev -- --port 5173
+```
+
+On Windows PowerShell systems that block `npm.ps1`, use `npm.cmd run dev`.
+
+Then open the URL printed in the terminal:
 
 ```text
-http://localhost:8000
+http://localhost:8000/
 ```
 
 ## GitHub Pages Deployment
@@ -88,6 +116,8 @@ http://localhost:8000
 4. Confirm the app opens from the repository subfolder URL.
 5. Confirm Firebase Authentication authorized domains include the GitHub Pages domain.
 6. After each release, hard refresh once so the new service worker cache is installed.
+
+For the DLL request release, deploy the updated `firestore.rules` before testing request creation or request-linked submissions, then deploy the static hosting files so clients receive the new service-worker cache.
 
 The app uses relative paths for `index.html`, `app.js`, `styles.css`, `manifest.json`, `firebase-config.js`, and `service-worker.js`, so it is suitable for GitHub Pages subfolder deployment.
 
@@ -104,6 +134,12 @@ The app uses relative paths for `index.html`, `app.js`, `styles.css`, `manifest.
 - CSV export, Excel export, print, and browser Save as PDF
 - Soft-copy/report/document URL validation
 - Required fields and duplicate-submit prevention
+- Principal, Master Teacher, and Head Teacher DLL request creation and request management
+- Request-linked DLL submission for teacher workloads, including multi-role Master/Head Teachers
+- Soft-copy link and hard-copy `submittedTo` validation
+- Closed-request submission blocking and returned-for-revision resubmission
+- Request-based DLL compliance, dashboard counters, urgent tasks, and legacy record isolation
+- Firestore Rules authorization tests for request ownership, workload ownership, active-request enforcement, and reviewer-only updates
 - Notification dropdown on desktop and mobile
 - PWA manifest and service worker refresh after deployment
 

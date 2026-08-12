@@ -31,6 +31,7 @@ export const resettableCollections = [
   "teacherWorkloads",
   "ancillaryAssignments",
   "gradeSubmissions",
+  "dllRequests",
   "lessonPlans",
   "systemSettings",
   "inventoryFacilities",
@@ -42,7 +43,6 @@ export const resettableCollections = [
 
 // Report Assignment constants
 export const reportAssignmentTypes = [
-  "DLL / Lesson Plan",
   "Exam / Test Questions",
   "Table of Specifications (TOS)",
   "Accomplishment Report",
